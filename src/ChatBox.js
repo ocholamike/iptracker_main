@@ -1,3 +1,4 @@
+import { showToast } from './App';
 // src/ChatBox.js
 import React, { useEffect, useState, useRef } from 'react';
 import { firestore, auth } from './firebaseConfig';
@@ -8,7 +9,10 @@ import {
   orderBy,
   onSnapshot,
   serverTimestamp,
+  doc,
+  getDoc,
 } from 'firebase/firestore';
+import { onAuthStateChanged } from 'firebase/auth';
 
 import './ChatBox.css';
 
@@ -22,11 +26,40 @@ function ChatBox({ conversationId: propConversationId, recipientId, onClose, use
   const [messages, setMessages] = useState([]);
   const messagesEndRef = useRef(null);
   const [currentUserId, setCurrentUserId] = useState(null);
+  const [recipientName, setRecipientName] = useState(null);
+  const [recipientRole, setRecipientRole] = useState(null);
+  const [unreadCount, setUnreadCount] = useState(0);
 
   useEffect(() => {
-    setCurrentUserId(auth.currentUser?.uid || null);
-    // if auth state changes elsewhere, we could listen here; kept minimal
+    // keep current user id in sync with auth state
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setCurrentUserId(u?.uid || null);
+    });
+    return () => unsub && unsub();
   }, []);
+
+  // fetch recipient name for header
+  useEffect(() => {
+    if (!recipientId) { setRecipientName(null); setRecipientRole(null); return; }
+    const fetchNameAndRole = async () => {
+      try {
+        const d = await getDoc(doc(firestore, 'users', recipientId));
+        if (d.exists()) {
+          const data = d.data();
+          setRecipientName(data.name || data.fullName || recipientId);
+          setRecipientRole(data.role || null);
+        } else {
+          setRecipientName(recipientId);
+          setRecipientRole(null);
+        }
+      } catch (e) {
+        console.warn('Failed to fetch recipient info', e);
+        setRecipientName(recipientId);
+        setRecipientRole(null);
+      }
+    };
+    fetchNameAndRole();
+  }, [recipientId]);
 
   // compute deterministic convId (override prop if inconsistent)
   const convId = generateConversationId(currentUserId, recipientId) || propConversationId;
@@ -40,12 +73,21 @@ function ChatBox({ conversationId: propConversationId, recipientId, onClose, use
     const q = query(messagesRefPath, orderBy('timestamp', 'asc'));
 
     const unsub = onSnapshot(q, (snapshot) => {
-      setMessages(snapshot.docs.map(doc => doc.data()));
+      const docs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      // attach a friendly senderName for received messages when available
+      const enhanced = docs.map((d) => ({ ...d, senderName: d.senderId === currentUserId ? 'You' : (d.senderName || null) }));
+      setMessages(enhanced);
+
+      // compute unread count for this session (simple heuristic: messages where recipientId === currentUserId and not seen)
+      if (currentUserId) {
+        const unread = docs.filter(m => m.recipientId === currentUserId && (!m.seen || m.senderId !== currentUserId)).length;
+        setUnreadCount(unread);
+      }
     });
 
     return () => unsub();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [convId]); // intentionally only convId so path is stable
+  }, [convId, currentUserId]); // include currentUserId so we can compute unread count reliably
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -53,11 +95,10 @@ function ChatBox({ conversationId: propConversationId, recipientId, onClose, use
 
   const sendMessage = async () => {
     if (!message.trim()) return;
-    if (!currentUserId) return alert('Not signed in');
-
+    if (!currentUserId) { showToast('Not signed in', 'error'); return; }
     // ensure convId exists
     const finalConvId = generateConversationId(currentUserId, recipientId);
-    if (!finalConvId) return alert('Conversation id missing');
+    if (!finalConvId) { showToast('Conversation id missing', 'error'); return; }
 
     const finalMessagesRef = collection(firestore, 'conversations', finalConvId, 'messages');
 
@@ -72,13 +113,18 @@ function ChatBox({ conversationId: propConversationId, recipientId, onClose, use
     setMessage('');
   };
 
-  const talkingTo = userRole === 'customer' ? 'Cleaner' : 'Customer';
+  const talkingTo = recipientName || (userRole === 'customer' ? 'Cleaner' : 'Customer');
+  const talkingSubtitle = recipientRole ? `${recipientRole.charAt(0).toUpperCase()}${recipientRole.slice(1)}` : '';
 
   return (
     <div className="chatbox-container">
       {/* Header */}
       <div className="chatbox-header">
-        <span className="chat-title">💬 Talking to: <strong>{talkingTo}</strong></span>
+        <div>
+          <span className="chat-title">💬 <strong>{talkingTo}</strong></span>
+          {talkingSubtitle && <div className="chat-subtitle">{talkingSubtitle}</div>}
+          {unreadCount > 0 && <span className="chat-unread"> {unreadCount} new</span>}
+        </div>
         <button onClick={onClose} className="chatbox-close-button">✖</button>
       </div>
 
@@ -86,12 +132,18 @@ function ChatBox({ conversationId: propConversationId, recipientId, onClose, use
       <div className="chatbox-messages">
         {messages.map((msg, i) => {
           const isSender = msg.senderId === currentUserId;
+          const otherName = recipientName || (userRole === 'customer' ? 'Cleaner' : 'Customer');
+          const senderLabel = isSender ? 'You' : (msg.senderName || otherName);
           return (
             <div
               key={i}
               className={`chatbox-message-row ${isSender ? 'chatbox-message-sent' : 'chatbox-message-received'}`}
             >
-              <div className="chatbox-message-bubble">
+              <div className="message-meta">
+                <div className="message-sender">{senderLabel}</div>
+              </div>
+
+              <div className={`chatbox-message-bubble ${isSender ? 'sent' : 'received'}`}>
                 <div className="message-text">{msg.text}</div>
                 <div className="chatbox-message-timestamp">
                   {msg.timestamp?.toDate ? msg.timestamp?.toDate().toLocaleTimeString([], {

@@ -14,7 +14,15 @@ export default function DataTable({
   const [sortKey, setSortKey] = useState(null);
   const [sortDir, setSortDir] = useState("asc");
   const [page, setPage] = useState(1);
+  const [isMobile, setIsMobile] = useState(typeof window !== 'undefined' ? window.innerWidth < 640 : false);
   const pageSize = 10;
+
+  // handle resize to toggle mobile view
+  React.useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 640);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   const filtered = useMemo(() => {
     let d = [...data];
@@ -137,57 +145,78 @@ export default function DataTable({
       </div>
 
       <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead className="bg-gray-100">
-            <tr>
-              {columns.map((col) => (
-                <th
-                  key={col.key}
-                  onClick={() => toggleSort(col.key)}
-                  className="p-2 text-left cursor-pointer"
-                >
-                  {col.label}
-                  {sortKey === col.key && ` (${sortDir})`}
-                </th>
-              ))}
-
-              {(onDelete || onEdit) && <th className="p-2">Actions</th>}
-            </tr>
-          </thead>
-
-          <tbody>
-            {pageData.map((row) => (
-              <tr key={row.id} className="border-b">
-                {columns.map((c) => (
-                  <td key={c.key} className="p-2">
-                    {row[c.key]}
-                  </td>
+        {!isMobile ? (
+          <table className="w-full text-sm">
+            <thead className="bg-gray-100">
+              <tr>
+                {columns.map((col) => (
+                  <th
+                    key={col.key}
+                    onClick={() => toggleSort(col.key)}
+                    className="p-2 text-left cursor-pointer"
+                  >
+                    {col.label}
+                    {sortKey === col.key && ` (${sortDir})`}
+                  </th>
                 ))}
 
-                {(onDelete || onEdit) && (
-                  <td className="p-2 flex gap-2">
-                    {onEdit && (
-                      <button
-                        className="px-2 py-1 bg-yellow-100 rounded"
-                        onClick={() => onEdit(row)}
-                      >
-                        View
-                      </button>
-                    )}
-                    {onDelete && (
-                      <button
-                        className="px-2 py-1 bg-red-200 rounded"
-                        onClick={() => onDelete(row.id)}
-                      >
-                        Delete
-                      </button>
-                    )}
-                  </td>
-                )}
+                {(onDelete || onEdit) && <th className="p-2">Actions</th>}
               </tr>
+            </thead>
+
+            <tbody>
+              {pageData.map((row) => (
+                <tr key={row.id} className="border-b">
+                  {columns.map((c) => (
+                    <td key={c.key} className="p-2 align-top max-w-xs break-words">
+                      <div className="whitespace-normal break-words text-sm">{row[c.key]}</div>
+                    </td>
+                  ))}
+
+                  {(onDelete || onEdit) && (
+                    <td className="p-2 flex gap-2">
+                      {onEdit && (
+                        <button
+                          className="px-2 py-1 bg-yellow-100 rounded"
+                          onClick={() => onEdit(row)}
+                        >
+                          View
+                        </button>
+                      )}
+                      {onDelete && (
+                        <button
+                          className="px-2 py-1 bg-red-200 rounded"
+                          onClick={() => onDelete(row.id)}
+                        >
+                          Delete
+                        </button>
+                      )}
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <div className="space-y-3">
+            {pageData.map((row) => (
+              <div key={row.id} className="p-3 bg-gray-50 rounded shadow-sm">
+                {columns.map((c) => (
+                  <div key={c.key} className="flex flex-col gap-1 mb-2 text-sm">
+                    <div className="text-gray-600 font-medium">{c.label}</div>
+                    <div className="text-right break-words">{row[c.key]}</div>
+                  </div>
+                ))}
+                {(onEdit || onDelete) && (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {onEdit && <button className="px-2 py-1 bg-yellow-100 rounded" onClick={() => onEdit(row)}>View</button>}
+                    {onDelete && <button className="px-2 py-1 bg-red-200 rounded" onClick={() => onDelete(row.id)}>Delete</button>}
+                  </div>
+                )}
+              </div>
             ))}
-          </tbody>
-        </table>
+          </div>
+        )}
       </div>
 
       <div className="mt-3 flex justify-between text-sm">

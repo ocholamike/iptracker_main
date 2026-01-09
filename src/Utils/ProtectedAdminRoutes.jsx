@@ -25,9 +25,13 @@ const ProtectedAdminRoutes = () => {
     checkAccess();
   }, []);
 
-  if (loading) return null; // or a spinner
+  if (loading) {
+    return <div style={{ textAlign: "center", marginTop: "2rem" }}>Checking access…</div>;
+  }
 
-  return isAllowed ? <Outlet /> : <Navigate to="/" replace />;
+
+  return isAllowed ? <Outlet /> : <Navigate to="/" replace state={{ from: "admin" }} />;
+
 };
 
 export default ProtectedAdminRoutes;

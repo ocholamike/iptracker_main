@@ -15,12 +15,14 @@ import {
 } from "firebase/firestore";
 
 // Allowed fields for updates
+// Note: we support both old single `category` and new `categories` array (preferred)
 const SAFE_USER_FIELDS = [
   "name",
   "email",
   "phone",
   "photoURL",
-  "category"
+  "category",
+  "categories"
 ];
 
 /** -------------------------------
@@ -32,6 +34,7 @@ export async function createUserProfile({
   email = "",
   phone = "",
   role = "customer",
+  categories = [],
   category = null,
   photoURL = "",
   meta = {}
@@ -45,7 +48,8 @@ export async function createUserProfile({
     email,
     phone,
     role,
-    category,
+    // prefer `categories` array; if `category` string provided, convert
+    categories: Array.isArray(categories) && categories.length ? categories : (category ? [category] : []),
     photoURL,
     rating: 0,
     ratingCount: 0,
@@ -98,10 +102,11 @@ export async function getUsersByRole(role) {
 
 /** ------------------------------- */
 export async function getCleanersByCategory(category) {
+  // cleaners may store categories as an array; use array-contains for matching
   const q = query(
     collection(db, "users"),
     where("role", "==", "cleaner"),
-    where("category", "==", category)
+    where("categories", "array-contains", category)
   );
   const snap = await getDocs(q);
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));

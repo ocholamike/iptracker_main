@@ -15,7 +15,7 @@ import {
 /**
  * Add a customer rating for a cleaner (only if booking is completed)
  */
-export async function addRating({ cleanerId, customerId, bookingId, rating, comment }) {
+export async function addRating({ cleanerUid, customerUid, bookingId, rating, comment }) {
   try {
     // ✅ Check if the booking exists and is completed
     const bookingRef = doc(db, "bookings", bookingId);
@@ -32,10 +32,10 @@ export async function addRating({ cleanerId, customerId, bookingId, rating, comm
       return;
     }
 
-    // ✅ Add the rating to Firestore
+    // ✅ Add the rating to Firestore (use cleanerUid/customerUid for consistency)
     const docRef = await addDoc(collection(db, "ratings"), {
-      cleanerId,
-      customerId,
+      cleanerUid,
+      customerUid,
       bookingId,
       rating,
       comment,
@@ -48,17 +48,17 @@ export async function addRating({ cleanerId, customerId, bookingId, rating, comm
     console.log("✅ Booking marked as rated");
 
     // ✅ Update cleaner's rating info (only if user is cleaner)
-    const cleanerRef = doc(db, "users", cleanerId);
+    const cleanerRef = doc(db, "users", cleanerUid);
     const cleanerSnap = await getDoc(cleanerRef);
 
     if (cleanerSnap.exists() && cleanerSnap.data().role === "cleaner") {
-      const q = query(collection(db, "ratings"), where("cleanerId", "==", cleanerId));
+      const q = query(collection(db, "ratings"), where("cleanerUid", "==", cleanerUid));
       const querySnapshot = await getDocs(q);
 
       let total = 0;
       let count = 0;
       querySnapshot.forEach((doc) => {
-        total += doc.data().rating;
+        total += Number(doc.data().rating || 0);
         count++;
       });
 
@@ -68,7 +68,7 @@ export async function addRating({ cleanerId, customerId, bookingId, rating, comm
         ratingCount: count
       });
 
-      console.log(`⭐ Updated cleaner ${cleanerId} rating: ${newAverage.toFixed(1)} (${count} ratings)`);
+      console.log(`⭐ Updated cleaner ${cleanerUid} rating: ${newAverage.toFixed(1)} (${count} ratings)`);
     }
 
   } catch (error) {
@@ -80,9 +80,9 @@ export async function addRating({ cleanerId, customerId, bookingId, rating, comm
 /**
  * Get all ratings for a specific cleaner
  */
-export async function getCleanerRatings(cleanerId) {
+export async function getCleanerRatings(cleanerUid) {
   try {
-    const q = query(collection(db, "ratings"), where("cleanerId", "==", cleanerId));
+    const q = query(collection(db, "ratings"), where("cleanerUid", "==", cleanerUid));
     const querySnapshot = await getDocs(q);
     const ratings = [];
     querySnapshot.forEach((doc) => ratings.push({ id: doc.id, ...doc.data() }));
@@ -98,9 +98,9 @@ export async function getCleanerRatings(cleanerId) {
 /**
  * Get average rating for a cleaner
  */
-export async function getAverageRating(cleanerId) {
+export async function getAverageRating(cleanerUid) {
   try {
-    const q = query(collection(db, "ratings"), where("cleanerId", "==", cleanerId));
+    const q = query(collection(db, "ratings"), where("cleanerUid", "==", cleanerUid));
     const querySnapshot = await getDocs(q);
 
     if (querySnapshot.empty) {
@@ -113,12 +113,12 @@ export async function getAverageRating(cleanerId) {
 
     querySnapshot.forEach((doc) => {
       const data = doc.data();
-      total += data.rating;
+      total += Number(data.rating || 0);
       count++;
     });
 
     const average = total / count;
-    console.log(`⭐ Average rating for cleaner ${cleanerId}:`, average.toFixed(2));
+    console.log(`⭐ Average rating for cleaner ${cleanerUid}:`, average.toFixed(2));
     return average;
   } catch (error) {
     console.error("❌ Error calculating average rating:", error);
@@ -131,21 +131,21 @@ export async function getAverageRating(cleanerId) {
  * Calculates the average rating for a specific cleaner
  * @param {string} cleanerId
  */
-export async function getAverageRatingForCleaner(cleanerId) {
+export async function getAverageRatingForCleaner(cleanerUid) {
   try {
-    const q = query(collection(db, "ratings"), where("cleanerId", "==", cleanerId));
+    const q = query(collection(db, "ratings"), where("cleanerUid", "==", cleanerUid));
     const querySnapshot = await getDocs(q);
 
     let total = 0;
     let count = 0;
 
     querySnapshot.forEach((doc) => {
-      total += doc.data().rating;
+      total += Number(doc.data().rating || 0);
       count++;
     });
 
     const average = count > 0 ? total / count : 0;
-    console.log(`⭐ Average rating for ${cleanerId}: ${average.toFixed(1)} (${count} ratings)`);
+    console.log(`⭐ Average rating for ${cleanerUid}: ${average.toFixed(1)} (${count} ratings)`);
 
     return average;
   } catch (error) {

@@ -7,15 +7,15 @@ import ProtectedAdminRoutes from "./Utils/ProtectedAdminRoutes";
 
 function MainRouter() {
   return (
-    <BrowserRouter>
+    <BrowserRouter basename="/iptracker-main">
       <Routes>
-        <Route element={<LandingAuth />} path="/" />
-        <Route element={<AdminLogin />} path="/admin-login" />
-        <Route element={<App />} path="/app" />
+        <Route path="/" element={<LandingAuth />} />
+        <Route path="/admin-login" element={<AdminLogin />} />
+        <Route path="/app" element={<App />} />
 
         {/* Only admin can access */}
         <Route element={<ProtectedAdminRoutes />}>
-          <Route element={<Dashboard />} path="/admin_dashboard" />
+          <Route path="/admin_dashboard" element={<Dashboard />} />
         </Route>
       </Routes>
     </BrowserRouter>

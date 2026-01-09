@@ -1,28 +1,37 @@
+import { showToast } from './App';
 // src/dashboard.js
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useState, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 
 import ModalPanel from "./components/ModalPanel";
 import WeeklyGraph from "./components/WeeklyGraph";
-import DataTable from "./components/DataTable";
+import DataTable from "./components/CleanerTableModal";
 import CleanerDetailModal from "./components/CleanerDetailModal";
+import ReauthModal from "./components/ReauthModal";
 
 import {
   collection,
   onSnapshot,
   doc,
-  deleteDoc,
-  query,
-  where
+  deleteDoc
 } from "firebase/firestore";
+
+// Map + RTDB imports for showing active cleaners
+import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
+import 'leaflet/dist/leaflet.css';
+import L from 'leaflet';
+import { database, ref as rtdbRef, onValue } from './firebaseConfig';
 
 import {
   getIncomePerCleaner,
-  getRatingsPerCleaner
+  getRatingsPerCleaner,
+  deleteIncomeForCleaner
 } from "./services/reportService";
 
-import { firestore as db } from "./firebaseConfig";
+import { firestore as db, auth } from "./firebaseConfig";
 import { updateBookingStatus } from "./services/bookingService";
+import { updateEmail, updatePassword, EmailAuthProvider, reauthenticateWithCredential } from 'firebase/auth';
+import { updateUser } from "./services/userService";
 
 /** ---------- Helpers ---------- */
 
@@ -65,6 +74,17 @@ function formatKsh(n) {
   return `Ksh ${v.toLocaleString("en-KE")}`;
 }
 
+// human readable duration (ms)
+function formatDuration(ms) {
+  if (!ms || ms <= 0) return '—';
+  const totalSec = Math.floor(ms / 1000);
+  const hrs = Math.floor(totalSec / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  if (hrs > 0) return `${hrs}h ${mins}m`;
+  if (mins > 0) return `${mins}m`;
+  return `${totalSec}s`;
+}
+
 // status icon
 function statusIcon(s) {
   if (!s) return "";
@@ -75,10 +95,41 @@ function statusIcon(s) {
   return "ℹ️";
 }
 
-// get start of today (local)
-function startOfDay(d = new Date()) {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+// Leaflet icon helper (small copy from App.js)
+const createRoleIcon = (imageUrl, role = 'cleaner') =>
+  L.divIcon({
+    className: 'custom-div-icon',
+    html: `
+      <div class="marker-pin ${role}"></div>
+      <div class="icon-wrapper">
+        <img src="${imageUrl}" class="icon-image" alt="${role}" />
+      </div>
+    `,
+    iconSize: [40, 40],
+    iconAnchor: [20, 40],
+    popupAnchor: [0, -40],
+  });
+
+// Fit bounds helper component for maps
+function FitBounds({ markers }) {
+  const map = useMap();
+  useEffect(() => {
+    if (!markers || markers.length === 0) return;
+    try {
+      const bounds = L.latLngBounds(markers.map(m => [m.lat, m.lng]));
+      if (markers.length === 1) {
+        map.setView([markers[0].lat, markers[0].lng], 12);
+      } else {
+        map.fitBounds(bounds, { padding: [50, 50] });
+      }
+    } catch (e) {
+      console.warn('FitBounds failed', e);
+    }
+  }, [markers]);
+  return null;
 }
+
+
 
 /** ---------- Component ---------- */
 
@@ -86,12 +137,17 @@ export default function DashboardLayout() {
   const navigate = useNavigate();
 
   const [activePanel, setActivePanel] = useState("dashboard");
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // raw collections
   const [usersMap, setUsersMap] = useState({}); // id -> user
   const [cleaners, setCleaners] = useState([]); // array of cleaner users
   const [bookings, setBookings] = useState([]); // array of bookings
   const [payments, setPayments] = useState([]); // array of payments (if needed)
+  // realtime locations (from RTDB)
+  const [locations, setLocations] = useState({});
+  // audits feature removed per request
+  
 
   // weekly stats
   const [weeklyBookings, setWeeklyBookings] = useState(new Array(7).fill(0));
@@ -102,12 +158,43 @@ export default function DashboardLayout() {
     incomePerCleaner: [],
     ratingsPerCleaner: []
   });
+  const [reportFrom, setReportFrom] = useState(null);
+  const [reportTo, setReportTo] = useState(null);
+
 
   // admin profile (fetched from users collection where role === 'admin')
   const [adminProfile, setAdminProfile] = useState(null);
 
   // modal selection
   const [selectedCleaner, setSelectedCleaner] = useState(null);
+  const [selectedBooking, setSelectedBooking] = useState(null);
+  const [showAdminEdit, setShowAdminEdit] = useState(false);
+  const [adminEditName, setAdminEditName] = useState('');
+  const [adminEditEmail, setAdminEditEmail] = useState('');
+  const [adminEditPassword, setAdminEditPassword] = useState('');
+  const [adminSaving, setAdminSaving] = useState(false);
+
+  // secure re-auth modal state and a promise bridge to await user input
+  const [reauthOpen, setReauthOpen] = useState(false);
+  const reauthPromiseRef = useRef(null);
+  const requestReauth = (email) => new Promise((resolve, reject) => {
+    reauthPromiseRef.current = { resolve, reject, email };
+    setReauthOpen(true);
+  });
+  const handleReauthConfirm = (password) => {
+    setReauthOpen(false);
+    if (reauthPromiseRef.current) {
+      reauthPromiseRef.current.resolve(password);
+      reauthPromiseRef.current = null;
+    }
+  };
+  const handleReauthCancel = () => {
+    setReauthOpen(false);
+    if (reauthPromiseRef.current) {
+      reauthPromiseRef.current.reject(new Error('cancelled'));
+      reauthPromiseRef.current = null;
+    }
+  };
 
   // protect admin route
   useEffect(() => {
@@ -128,8 +215,9 @@ export default function DashboardLayout() {
       snap.docs.forEach((d) => {
         const data = { id: d.id, ...d.data() };
         map[d.id] = data;
-        if (data.role === "cleaner") cleanersList.push(data);
-        if (!admin && data.role === "admin") admin = data;
+        const role = (data.role || '').toLowerCase();
+        if (role === "cleaner") cleanersList.push(data);
+        if (!admin && role === "admin") admin = data;
       });
       setUsersMap(map);
       setCleaners(cleanersList);
@@ -155,6 +243,22 @@ export default function DashboardLayout() {
     });
     return unsub;
   }, []);
+
+  /** ---------- realtime: locations (RTDB) ---------- */
+  useEffect(() => {
+    try {
+      const locRef = rtdbRef(database, 'locations');
+      const unsub = onValue(locRef, (snap) => {
+        const val = snap.val() || {};
+        setLocations(val);
+      });
+      return () => unsub;
+    } catch (e) {
+      console.warn('Failed subscribe to locations', e);
+    }
+  }, []);
+
+
 
   /** ---------- weekly stats calculation (last 7 days) ---------- */
   useEffect(() => {
@@ -192,7 +296,7 @@ export default function DashboardLayout() {
         // treat completed/closed/paid bookings as revenue
         if (["closed", "completed", "paid"].includes(String(b.status).toLowerCase())) {
           const diffDays = Math.floor((d - start) / (1000 * 60 * 60 * 24));
-          if (diffDays >= 0 && diffDays < 7) earningsArr[diffDays] += Number(b.price || 0);
+          if (diffDays >= 0 && diffDays < 7) earningsArr[diffDays] += Number(b.amountPaid || 0);
         }
       });
     }
@@ -200,12 +304,41 @@ export default function DashboardLayout() {
   }, [bookings, payments]);
 
   /** ---------- Reports loader (on demand) ---------- */
+  const formatDateForFilename = (d) => {
+    if (!d) return 'ALL';
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}${m}${day}`;
+  };
+
+  const refreshReports = async (from = reportFrom, to = reportTo) => {
+    // accept Date objects or null
+    const income = await getIncomePerCleaner(from, to);
+    const ratings = await getRatingsPerCleaner(from, to);
+    setReports({ incomePerCleaner: income, ratingsPerCleaner: ratings });
+  };
+
+  const applyPresetDays = async (days) => {
+    const now = new Date();
+    const to = new Date(now);
+    to.setHours(23, 59, 59, 999);
+    const from = new Date(now);
+    from.setDate(from.getDate() - (days - 1));
+    from.setHours(0, 0, 0, 0);
+    setReportFrom(from);
+    setReportTo(to);
+    await refreshReports(from, to);
+  };
+
   const openReportsPanel = async () => {
     setActivePanel("reports");
-    // We still use aggregated service functions for income/ratings
-    const income = await getIncomePerCleaner();
-    const ratings = await getRatingsPerCleaner();
-    setReports({ incomePerCleaner: income, ratingsPerCleaner: ratings });
+    // default to last 30 days if no explicit range selected
+    if (!reportFrom && !reportTo) {
+      await applyPresetDays(30);
+    } else {
+      await refreshReports();
+    }
   };
 
   const endAdminSession = () => {
@@ -220,23 +353,26 @@ export default function DashboardLayout() {
     try {
       await deleteDoc(doc(db, collectionName, id));
     } catch (err) {
-      alert("Delete failed");
+      if (typeof showToast === 'function') showToast('Delete failed', 'error');
     }
   };
 
-  // Columns for DataTable (kept simple)
+  // Columns for CleanerTableModal (kept simple)
   const cleanerColumns = [
     { key: "name", label: "Name" },
     { key: "email", label: "Email" },
+    { key: "phone", label: "Phone" },
     { key: "rating", label: "Rating" },
-    { key: "category", label: "Category" }
+    { key: "categories", label: "Categories" }
   ];
 
   const bookingColumns = [
-    { key: "customerId", label: "Customer ID" },
-    { key: "cleanerId", label: "Cleaner ID" },
+    { key: "bookingId", label: "Booking ID" },
+    { key: "customerName", label: "Customer" },
+    { key: "cleanerName", label: "Cleaner" },
     { key: "price", label: "Price" },
-    { key: "status", label: "Status" }
+    { key: "status", label: "Status" },
+    { key: "timeTaken", label: "Time Taken" }
   ];
 
   /** ---------- Derived panels data ---------- */
@@ -288,17 +424,24 @@ export default function DashboardLayout() {
 
     // fallback: use usersMap rating field
     const fallback = Object.values(usersMap)
-      .filter((u) => u.role === "cleaner" && (u.rating || u.ratingCount))
-      .map((u) => {
-        const jobsCompleted = bookings.filter((b) => String(b.cleanerId) === String(u.id) && String(b.status).toLowerCase() === "closed").length;
+      .filter(u => (u.role || '').toLowerCase() === 'cleaner')
+      .map(u => {
+        const jobsCompleted = u.completedJobs ??
+          bookings.filter(
+            b =>
+              String(b.cleanerId) === String(u.uid || u.id) &&
+              String(b.status).toLowerCase() === 'closed'
+          ).length;
+
         return {
-          id: u.id,
-          name: u.name || u.fullName || u.email || u.id,
-          average: u.rating || 0,
-          count: u.ratingCount || 0,
+          id: u.uid || u.id,
+          name: u.name || u.email || u.id,
+          average: Number(u.averageRating || 0),
+          count: Number(u.ratingCount || 0),
           jobsCompleted
         };
       })
+      .filter(c => c.count > 0)
       .sort((a, b) => b.average - a.average)
       .slice(0, 3);
 
@@ -312,31 +455,222 @@ export default function DashboardLayout() {
     return u.name || u.fullName || u.email || id;
   };
 
-  // helper to get booking customer name
-  const getCustomerName = (booking) => {
-    return getUserName(booking.customerId);
+  // helper to normalize cleaner for detail view modal
+  const normalizeCleanerForView = (u) => {
+    const cleanerId = u.uid || u.id;
+
+    const completedJobs =
+      Number(u.completedJobs) ||
+      bookings.filter(
+        b =>
+          String(b.cleanerId) === String(cleanerId) &&
+          String(b.status).toLowerCase() === "closed"
+      ).length;
+
+    const totalEarnings = calculateCleanerEarnings(cleanerId);
+
+    return {
+      id: cleanerId,
+      name: u.name || u.meta?.name || u.email || "—",
+      email: u.email || "—",
+      phone: u.phone || "—",
+      status: u.status || "—",
+
+      averageRating: Number(u.averageRating || 0),
+      ratingCount: Number(u.ratingCount || 0),
+
+      categories: Array.isArray(u.categories)
+        ? u.categories
+        : u.category
+          ? [u.category]
+          : [],
+
+      completedJobs,
+      totalEarnings,
+    };
   };
+
+
+  // helper to calculate total earnings for a cleaner from payments collection
+  const calculateCleanerEarnings = (cleanerId) => {
+    if (!cleanerId) return 0;
+
+    // Map bookingId → cleanerId
+    const bookingCleanerMap = {};
+    bookings.forEach(b => {
+      if (b.id && b.cleanerId) {
+        bookingCleanerMap[b.id] = b.cleanerId;
+      }
+    });
+
+    return payments.reduce((sum, p) => {
+      if (!p || !p.bookingId) return sum;
+
+      const paidCleanerId = p.payeeId || bookingCleanerMap[p.bookingId];
+
+      if (String(paidCleanerId) !== String(cleanerId)) return sum;
+
+      const amount = Number(p.amount);
+      if (isNaN(amount)) return sum;
+
+      return sum + amount;
+    }, 0);
+  };
+
+
+  // table-ready derived data
+  const cleanersTableData = useMemo(() => {
+    const source = (cleaners && cleaners.length) ? cleaners : Object.values(usersMap).filter(u => (u.role || '').toLowerCase().includes('cleaner'));
+    return source.map((u) => ({
+      id: u.id,
+      name: u.name || u.fullName || u.email || u.id,
+      email: u.email || "",
+      phone: u.phone || "",
+      rating: u.averageRating ?? u.rating ?? 0,
+      categories: u.categories && u.categories.length ? u.categories.join(", ") : (u.category || "Not specified")
+    }));
+  }, [cleaners, usersMap]);
+
+  const bookingsTableData = useMemo(() => {
+    return bookings.map((b) => {
+      const created = toDateSafe(b.createdAt);
+      const closed = toDateSafe(b.closedAt || b.completedAt);
+      const timeTaken =
+        created && closed
+          ? formatDuration(closed.getTime() - created.getTime())
+          : '—';
+
+
+      // Try to find final price: booking.price else payments for booking
+      let finalPrice =
+        b.price != null && Number(b.price) > 0
+          ? Number(b.price)
+          : null;
+
+      // fallback 1: paidAmount on booking itself
+      if (finalPrice == null && b.paidAmount != null) {
+        const paid = Number(b.paidAmount);
+        if (!isNaN(paid) && paid > 0) {
+          finalPrice = paid;
+        }
+      }
+
+      // fallback 2: payments collection
+      if (finalPrice == null && payments?.length) {
+        const bookPayments = payments.filter(
+          p =>
+            String(p.bookingId) === String(b.id) ||
+            String(p.bookingId) === String(b.bookingId)
+        );
+        if (bookPayments.length) {
+          finalPrice = bookPayments.reduce(
+            (s, p) => s + Number(p.amount || 0),
+            0
+          );
+        }
+      }
+
+      if (finalPrice == null && payments && payments.length) {
+        const bookPayments = payments.filter(p => String(p.bookingId) === String(b.id) || String(p.bookingId) === String(b.bookingId));
+        if (bookPayments.length) {
+          finalPrice = bookPayments.reduce((s, p) => s + Number(p.amount || 0), 0);
+        }
+      }
+
+      return {
+        id: b.id,
+        bookingId: b.bookingId || b.id,
+
+        customerId: b.customerId,
+        cleanerId: b.cleanerId,
+
+        customerName:
+          (usersMap[b.customerId] &&
+            (usersMap[b.customerId].name ||
+              usersMap[b.customerId].fullName ||
+              usersMap[b.customerId].email)) ||
+          b.customerName ||
+          b.customerId,
+
+        cleanerName:
+          (usersMap[b.cleanerId] &&
+            (usersMap[b.cleanerId].name ||
+              usersMap[b.cleanerId].fullName ||
+              usersMap[b.cleanerId].email)) ||
+          b.cleanerName ||
+          b.cleanerId,
+
+        // 🔥 PRICE FIX
+        price:
+          finalPrice != null && !isNaN(finalPrice) && finalPrice > 0
+            ? finalPrice
+            : Number(b.paidAmount || 0),
+
+        serviceType: b.serviceType || '—',
+        
+        // ⌚ TIMESTAMPS
+        createdAt: toDateSafe(b.createdAt),
+        closedAt: toDateSafe(b.closedAt || b.completedAt),
+
+
+        status: b.status,
+        timeTaken
+      };
+
+      
+    });
+  }, [bookings, usersMap, payments]);
+
+  // deduplicate RTDB locations by uid, keep latest timestamp
+  const dedupedLocations = useMemo(() => {
+    const map = {};
+    Object.entries(locations || {}).forEach(([key, loc]) => {
+      if (!loc || !loc.uid || !loc.lat || !loc.lng) return;
+      const cur = map[loc.uid];
+      const ts = loc.timestamp || loc.updatedAt || 0;
+      if (!cur || (ts > (cur.timestamp || cur.updatedAt || 0))) {
+        map[loc.uid] = { ...loc, sessionKey: key };
+      }
+    });
+    return Object.values(map);
+  }, [locations]);
+
+  const cleanerMarkers = useMemo(() => {
+    return dedupedLocations.filter(l => String(l.role).toLowerCase() === 'cleaner' && l.lat && l.lng);
+  }, [dedupedLocations]);
+
+
 
   // admin profile display values (fetched from users collection where role === 'admin')
   const adminName = adminProfile?.name || adminProfile?.fullName || "Super Admin";
   const adminEmail = adminProfile?.email || "admin@domain.com";
 
+  useEffect(() => {
+    if (adminProfile) {
+      setAdminEditName(adminProfile.name || '');
+      setAdminEditEmail(adminProfile.email || '');
+    }
+  }, [adminProfile]);
+
   /** ---------- Render ---------- */
   return (
     <div className="flex min-h-screen bg-gray-100">
-      {/* SIDEBAR */}
-      <aside className="w-64 bg-white shadow-lg p-6 flex flex-col gap-6">
+      {/* SIDEBAR (hidden on small screens) */}
+      <aside className="hidden md:flex w-64 bg-white shadow-lg p-6 flex-col gap-6">
         <div className="flex flex-col items-center text-center">
           <div className="w-20 h-20 rounded-full bg-gray-300 mb-3"></div>
           <h2 className="text-lg font-semibold">{adminName}</h2>
           <p className="text-sm text-gray-500">{adminEmail}</p>
 
-          <button
-            onClick={endAdminSession}
-            className="text-xs text-red-500 underline mt-2"
-          >
-            Exit Admin Mode
-          </button>
+          <div className="mt-2 flex gap-2">
+            <button onClick={() => setShowAdminEdit(true)} className="text-xs text-blue-600 underline">Edit Profile</button>
+            <button
+              onClick={endAdminSession}
+              className="text-xs text-red-500 underline"
+            >
+              Exit Admin Mode
+            </button>
+          </div>
         </div>
 
         <nav className="flex flex-col gap-3 text-gray-700">
@@ -346,11 +680,39 @@ export default function DashboardLayout() {
           <button className="p-3 rounded-xl hover:bg-gray-200 text-left" onClick={() => setActivePanel("maps")}>Maps</button>
           <button className="p-3 rounded-xl hover:bg-gray-200 text-left" onClick={openReportsPanel}>Reports</button>
           <button className="p-3 rounded-xl hover:bg-gray-200 text-left" onClick={() => setActivePanel("conversations")}>Conversations</button>
+
         </nav>
       </aside>
 
+      {/* MOBILE MENU: hamburger and overlay */}
+      {/* we render mobile controls in the main panel (md:hidden) */}
+
       {/* RIGHT PANEL */}
       <main className="flex-1 p-8 flex flex-col gap-8">
+        {/* MOBILE HEADER (hamburger) */}
+        <div className="md:hidden flex items-center justify-between mb-4">
+          <button onClick={() => setMobileMenuOpen(m => !m)} aria-label="Toggle menu" className="p-2 rounded-md bg-white shadow">
+            ☰
+          </button>
+          <h2 className="text-lg font-semibold">Admin</h2>
+        </div>
+
+        {/* MOBILE MENU OVERLAY */}
+        {mobileMenuOpen && (
+          <div className="md:hidden absolute top-20 left-4 right-4 bg-white rounded shadow-lg z-50 p-4">
+            <nav className="flex flex-col gap-3 text-gray-700">
+              <button className="p-3 rounded-xl hover:bg-gray-200 text-left" onClick={() => { setActivePanel('dashboard'); setMobileMenuOpen(false); }}>Dashboard</button>
+              <button className="p-3 rounded-xl hover:bg-gray-200 text-left" onClick={() => { setActivePanel('cleaners'); setMobileMenuOpen(false); }}>Cleaners</button>
+              <button className="p-3 rounded-xl hover:bg-gray-200 text-left" onClick={() => { setActivePanel('bookings'); setMobileMenuOpen(false); }}>Bookings</button>
+              <button className="p-3 rounded-xl hover:bg-gray-200 text-left" onClick={() => { setActivePanel('maps'); setMobileMenuOpen(false); }}>Maps</button>
+              <button className="p-3 rounded-xl hover:bg-gray-200 text-left" onClick={() => { openReportsPanel(); setMobileMenuOpen(false); }}>Reports</button>
+              <button className="p-3 rounded-xl hover:bg-gray-200 text-left" onClick={() => { setActivePanel('conversations'); setMobileMenuOpen(false); }}>Conversations</button>
+            </nav>
+            <div className="mt-3 text-right">
+              <button onClick={() => setMobileMenuOpen(false)} className="px-3 py-1 text-sm">Close</button>
+            </div>
+          </div>
+        )}
         {/* Dashboard */}
         {activePanel === "dashboard" && (
           <>
@@ -394,7 +756,7 @@ export default function DashboardLayout() {
                         <div className="text-xs text-gray-500">{timeAgo(date)} ago</div>
                       </div>
                       <div className="text-right">
-                        <div className="text-sm font-semibold">{formatKsh(job.price)}</div>
+                        <div className="text-sm font-semibold">{formatKsh(job.paidAmount)}</div>
                         <div className="text-xs text-gray-500">{statusIcon(job.status)} {job.status}</div>
                       </div>
                     </div>
@@ -436,7 +798,10 @@ export default function DashboardLayout() {
                       <div className="text-xs text-gray-500">{c.count} ratings</div>
                     </div>
                     <div className="text-right">
-                      <div className="text-sm font-semibold">{Number(c.average).toFixed(1)} ⭐</div>
+                      <div className="text-sm font-semibold">
+                        {(Number(c.average || 0)).toFixed(1)} ⭐
+                      </div>
+
                       <div className="text-xs text-gray-500">{c.jobsCompleted} jobs</div>
                     </div>
                   </div>
@@ -457,13 +822,18 @@ export default function DashboardLayout() {
           <ModalPanel title="Cleaners" onClose={() => setActivePanel("dashboard")}>
             <DataTable
               columns={cleanerColumns}
-              data={cleaners}
+              data={cleanersTableData}
               onDelete={(id) => handleDeleteDoc("users", id)}
-              onEdit={(row) => setSelectedCleaner(row)}
+              onEdit={(row) => {
+                const fullCleaner = usersMap[row.id];
+                if (!fullCleaner) return;
+                setSelectedCleaner(normalizeCleanerForView(fullCleaner));
+              }}
+
               exportFilename="cleaners.csv"
             />
           </ModalPanel>
-        )}
+        )} 
 
         {/* CLEANER DETAIL */}
         {selectedCleaner && (
@@ -472,34 +842,108 @@ export default function DashboardLayout() {
           </ModalPanel>
         )}
 
+
+        {/* BOOKINGS panel */}
+        {selectedBooking && (
+          <ModalPanel title="Booking Details" onClose={() => setSelectedBooking(null)}>
+            <div className="p-4">
+              <div className="mb-2"><b>Booking ID:</b> {selectedBooking.bookingId || selectedBooking.id}</div>
+              <div className="mb-2"><b>Customer:</b> {selectedBooking.customerName}</div>
+              <div className="mb-2"><b>Customer Phone:</b> {(usersMap[selectedBooking.customerId] && usersMap[selectedBooking.customerId].phone) || '—'}</div>
+              <div className="mb-2"><b>Cleaner:</b> {selectedBooking.cleanerName}</div>
+              <div className="mb-2"><b>Cleaner Phone:</b> {(usersMap[selectedBooking.cleanerId] && usersMap[selectedBooking.cleanerId].phone) || '—'}</div>
+              <div className="mb-2"><b>Service:</b> {selectedBooking.serviceType || '—'}</div>
+              <div className="mb-2">
+                <b>Categories:</b>{' '}
+                {Array.isArray(usersMap[selectedBooking.cleanerId]?.categories)
+                  ? usersMap[selectedBooking.cleanerId].categories.join(', ')
+                  : '—'}
+              </div>
+              <div className="mb-2"><b>Price:</b> {formatKsh(selectedBooking.price)}</div>
+              <div className="mb-2"><b>Status:</b> {selectedBooking.status}</div>
+              <div className="mb-2"><b>Time Taken:</b> {selectedBooking.timeTaken}</div>
+              <div className="mb-2">
+                <b>Requested At:</b>{" "}
+                {selectedBooking.createdAt
+                  ? toDateSafe(selectedBooking.createdAt)?.toLocaleString()
+                  : "—"}
+              </div>
+              <div className="mb-2"><b>Completed At:</b> {(selectedBooking.closedAt || selectedBooking.completedAt || selectedBooking.closed_at || selectedBooking.completed_at) ? toDateSafe(selectedBooking.closedAt || selectedBooking.closed_at || selectedBooking.completedAt || selectedBooking.completed_at).toLocaleString() : '—'}</div>
+
+              <div className="mt-4 flex gap-2">
+                <button className="px-3 py-1 bg-blue-500 text-white rounded" onClick={() => {
+                  // Simple Booking Details print (not a customer payment receipt)
+                  const win = window.open('', '_blank');
+                  const requested = selectedBooking.__date ? selectedBooking.__date.toLocaleString() : '—';
+                  const closed = (selectedBooking.closedAt || selectedBooking.closed_at || selectedBooking.completedAt || selectedBooking.completed_at) ? toDateSafe(selectedBooking.closedAt || selectedBooking.closed_at || selectedBooking.completedAt || selectedBooking.completed_at).toLocaleString() : '—';
+                  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Booking Details</title><style>body{font-family:Arial,Helvetica,sans-serif;padding:20px;color:#111} h2{margin-bottom:6px} table{width:100%;border-collapse:collapse} td{padding:6px;border-bottom:1px solid #eee}</style></head><body><h2>Booking Details</h2><table><tr><td><strong>Booking ID</strong></td><td>${selectedBooking.bookingId || selectedBooking.id}</td></tr><tr><td><strong>Customer</strong></td><td>${selectedBooking.customerName}</td></tr><tr><td><strong>Customer Phone</strong></td><td>${(usersMap[selectedBooking.customerId] && usersMap[selectedBooking.customerId].phone) || '—'}</td></tr><tr><td><strong>Cleaner</strong></td><td>${selectedBooking.cleanerName}</td></tr><tr><td><strong>Cleaner Phone</strong></td><td>${(usersMap[selectedBooking.cleanerId] && usersMap[selectedBooking.cleanerId].phone) || '—'}</td></tr><tr><td><strong>Service</strong></td><td>${selectedBooking.serviceType || '—'}</td></tr><tr><td><strong>Categories</strong></td><td>${(usersMap[selectedBooking.cleanerId] && usersMap[selectedBooking.cleanerId].categories && usersMap[selectedBooking.cleanerId].categories.join(', ')) || '—'}</td></tr><tr><td><strong>Price</strong></td><td>${formatKsh(selectedBooking.price)}</td></tr><tr><td><strong>Status</strong></td><td>${selectedBooking.status}</td></tr><tr><td><strong>Requested At</strong></td><td>${requested}</td></tr><tr><td><strong>Completed At</strong></td><td>${closed}</td></tr><tr><td><strong>Time Taken</strong></td><td>${selectedBooking.timeTaken}</td></tr></table></body></html>`;
+                  win.document.write(html);
+                  win.print();
+                  win.close();
+                }}>Print</button>
+                <button className="px-3 py-1 bg-yellow-500 text-white rounded" onClick={async () => {
+                  const newStatus = prompt("Update status (pending, accepted, in-progress, closed, paid):", selectedBooking.status);
+                  if (!newStatus) return;
+                  await updateBookingStatus(selectedBooking.id, newStatus);
+                  showToast('Status updated', 'success');
+                  setSelectedBooking(null);
+                }}>Update Status</button>
+              </div>
+            </div>
+          </ModalPanel>
+        )}
+
+
+
         {/* BOOKINGS panel */}
         {activePanel === "bookings" && (
           <ModalPanel title="Bookings" onClose={() => setActivePanel("dashboard")}>
             <DataTable
               columns={bookingColumns}
-              data={bookings}
+              data={bookingsTableData}
               onDelete={(id) => handleDeleteDoc("bookings", id)}
-              onEdit={(row) => {
-                const newStatus = prompt("Update status (pending, accepted, in-progress, closed, paid):", row.status);
-                if (!newStatus) return;
-                updateBookingStatus(row.id, newStatus);
-              }}
+              onEdit={(row) => setSelectedBooking(row)}
               exportFilename="bookings.csv"
             />
           </ModalPanel>
-        )}
+        )} 
 
         {/* REPORTS */}
         {activePanel === "reports" && (
           <ModalPanel title="Reports & Analytics" onClose={() => setActivePanel("dashboard")}>
+            <div className="flex items-center gap-2 mb-4">
+              <label className="text-sm">From:</label>
+              <input type="date" value={reportFrom ? reportFrom.toISOString().slice(0,10) : ''} onChange={(e) => setReportFrom(e.target.value ? new Date(e.target.value) : null)} className="border p-1 rounded" />
+              <label className="text-sm">To:</label>
+              <input type="date" value={reportTo ? reportTo.toISOString().slice(0,10) : ''} onChange={(e) => setReportTo(e.target.value ? (new Date(e.target.value + 'T23:59:59')) : null)} className="border p-1 rounded" />
+              <button className="px-3 py-1 bg-blue-500 text-white rounded" onClick={() => refreshReports(reportFrom, reportTo)}>Refresh</button>
+              <div className="ml-2 flex gap-2">
+                <button className="px-2 py-1 border rounded text-sm" onClick={() => applyPresetDays(30)}>Last 30 days</button>
+                <button className="px-2 py-1 border rounded text-sm" onClick={() => applyPresetDays(90)}>Last 3 months</button>
+                <button className="px-2 py-1 border rounded text-sm" onClick={() => { setReportFrom(null); setReportTo(null); refreshReports(null, null); }}>All time</button>
+              </div>
+              <div className="ml-auto text-right text-sm text-gray-500">Range: {reportFrom ? reportFrom.toLocaleDateString() : 'All'} — {reportTo ? reportTo.toLocaleDateString() : 'All'}</div>
+            </div>
+
             <h3 className="text-lg font-semibold mt-2 mb-2">Income Per Cleaner</h3>
             <DataTable
               columns={[
                 { key: "cleanerId", label: "Cleaner ID" },
                 { key: "total", label: "Total Income" }
               ]}
-              data={reports.incomePerCleaner}
-              exportFilename="income_per_cleaner.csv"
+              data={reports.incomePerCleaner.map(r => ({ id: r.cleanerId, ...r }))}
+              onDelete={async (cleanerId) => {
+                if (!window.confirm('Delete payments for this cleaner in the selected range?')) return;
+                try {
+                  const deleted = await deleteIncomeForCleaner(cleanerId, reportFrom, reportTo);
+                  showToast(`Deleted ${deleted.length} payments.`, 'success');
+                  await refreshReports();
+                } catch (err) {
+                  console.error(err);
+                  showToast('Failed to delete payments', 'error');
+                }
+              }}
+              exportFilename={`income_per_cleaner_${formatDateForFilename(reportFrom)}_${formatDateForFilename(reportTo)}.csv`}
             />
 
             <h3 className="text-lg font-semibold mt-6 mb-2">Ratings Per Cleaner</h3>
@@ -510,7 +954,7 @@ export default function DashboardLayout() {
                 { key: "count", label: "Rating Count" }
               ]}
               data={reports.ratingsPerCleaner}
-              exportFilename="ratings_per_cleaner.csv"
+              exportFilename={`ratings_per_cleaner_${formatDateForFilename(reportFrom)}_${formatDateForFilename(reportTo)}.csv`}
             />
           </ModalPanel>
         )}
@@ -518,7 +962,52 @@ export default function DashboardLayout() {
         {/* MAPS */}
         {activePanel === "maps" && (
           <ModalPanel title="Maps" onClose={() => setActivePanel("dashboard")}>
-            <div className="h-64 flex items-center justify-center text-gray-500">Map Integration Placeholder</div>
+            <div className="h-96">
+              {cleanerMarkers.length === 0 ? (
+                <div className="h-64 flex items-center justify-center text-gray-500">No active cleaners broadcasting location</div>
+              ) : (
+                <MapContainer
+                  className="h-96 w-full rounded"
+                  center={[cleanerMarkers[0].lat, cleanerMarkers[0].lng]}
+                  zoom={12}
+                  scrollWheelZoom={false}
+                >
+                  <TileLayer
+                    attribution='&copy; <a href="https://osm.org/copyright">OpenStreetMap</a> contributors'
+                    url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                  />
+                  <FitBounds markers={cleanerMarkers} />
+
+                  {cleanerMarkers.map((loc) => {
+                    const user = usersMap[loc.uid] || {};
+                    const image = user.photoURL || user.avatar || 'https://img.icons8.com/ios-filled/50/000000/worker-male.png';
+                    const icon = createRoleIcon(image, 'cleaner');
+                    return (
+                      <Marker key={loc.sessionKey || loc.uid} position={[loc.lat, loc.lng]} icon={icon}>
+                        <Popup>
+                          <div style={{minWidth:200}}>
+                            <div style={{fontWeight:600}}>{user.name || loc.name || loc.uid}</div>
+                            <div className="text-sm text-gray-500">{user.phone || ''}</div>
+                            <div className="text-sm mt-2">
+                              Categories:{' '}
+                              {Array.isArray(user.categories)
+                                ? user.categories.join(', ')
+                                : '—'}
+                            </div>
+                            <div className="text-sm text-gray-500 mt-2">Accuracy: {loc.accuracy ? Math.round(loc.accuracy) + ' m' : '—'}</div>
+                            <div className="text-sm text-gray-500">Last: {timeAgo(new Date(loc.timestamp || loc.updatedAt))} ago</div>
+                            <div className="mt-2 flex gap-2">
+                              <button className="px-2 py-1 bg-blue-500 text-white rounded text-sm" onClick={() => setSelectedCleaner(normalizeCleanerForView(user || { id: loc.uid, name: loc.name }))}>View Profile</button>
+                            </div>
+                          </div>
+                        </Popup>
+                      </Marker>
+                    );
+                  })}
+
+                </MapContainer>
+              )}
+            </div>
           </ModalPanel>
         )}
 
@@ -528,6 +1017,113 @@ export default function DashboardLayout() {
             <div className="h-64 flex items-center justify-center text-gray-500">Chat Logs / Conversations Placeholder</div>
           </ModalPanel>
         )}
+
+        {/* ADMIN PROFILE EDIT */}
+        {showAdminEdit && (
+          <ModalPanel title="Edit Admin Profile" onClose={() => setShowAdminEdit(false)} overlay={true}>
+            <div className="p-4">
+              <div className="mb-2">
+                <label className="text-sm font-medium">Name</label>
+                <input className="w-full border p-2 rounded" value={adminEditName} onChange={(e) => setAdminEditName(e.target.value)} />
+              </div>
+              <div className="mb-2">
+                <label className="text-sm font-medium">Email</label>
+                <input className="w-full border p-2 rounded" value={adminEditEmail} onChange={(e) => setAdminEditEmail(e.target.value)} />
+              </div>
+              <div className="mb-2">
+                <label className="text-sm font-medium">Password (leave blank to keep)</label>
+                <input type="password" className="w-full border p-2 rounded" value={adminEditPassword} onChange={(e) => setAdminEditPassword(e.target.value)} />
+              </div>
+              <div className="mt-4 flex gap-2">
+                <button className="px-3 py-1 bg-blue-500 text-white rounded" onClick={async () => {
+                  setAdminSaving(true);
+                  try {
+                    // update firestore first
+                    await updateUser(adminProfile.id, { name: adminEditName, email: adminEditEmail });
+
+                    // then try auth updates if this is the signed-in admin
+                    const current = auth.currentUser;
+                    if (current && adminProfile.id === current.uid) {
+                      // update email and password with re-auth fallback
+                      if (adminEditEmail && adminEditEmail !== current.email) {
+                        try {
+                          await updateEmail(current, adminEditEmail);
+                        } catch (e) {
+                          // requires recent login => attempt re-auth
+                          if (e.code === 'auth/requires-recent-login') {
+                            try {
+                              const pwd = await requestReauth(current.email);
+                              const cred = EmailAuthProvider.credential(current.email, pwd);
+                              await reauthenticateWithCredential(current, cred);
+                              await updateEmail(current, adminEditEmail);
+                            } catch (reauthErr) {
+                              if (reauthErr && reauthErr.message === 'cancelled') {
+                                showToast('Email update cancelled (no password provided)', 'warning');
+                              } else {
+                                console.error('Reauth failed (email):', reauthErr);
+                                showToast('Could not update email: re-authentication failed', 'error');
+                              }
+                            }
+                          } else {
+                            console.error('Update email failed:', e);
+                            showToast('Failed to update email', 'error');
+                          }
+                        }
+                      }
+
+                      if (adminEditPassword) {
+                        try {
+                          await updatePassword(current, adminEditPassword);
+                        } catch (e) {
+                          if (e.code === 'auth/requires-recent-login') {
+                            try {
+                              const pwd = await requestReauth(current.email);
+                              const cred = EmailAuthProvider.credential(current.email, pwd);
+                              await reauthenticateWithCredential(current, cred);
+                              await updatePassword(current, adminEditPassword);
+                            } catch (reauthErr) {
+                              if (reauthErr && reauthErr.message === 'cancelled') {
+                                showToast('Password update cancelled (no password provided)', 'warning');
+                              } else {
+                                console.error('Reauth failed (password):', reauthErr);
+                                showToast('Could not update password: re-authentication failed', 'error');
+                              }
+                            }
+                          } else {
+                            console.error('Update password failed:', e);
+                            showToast('Failed to update password', 'error');
+                          }
+                        }
+                      }
+
+                      showToast('Admin profile updated (auth + firestore)', 'success');
+                    } else {
+                      showToast('Admin profile updated', 'success');
+                    }
+
+                    setShowAdminEdit(false);
+                  } catch (err) {
+                    console.error('Failed update admin', err);
+                    showToast('Failed to update admin profile', 'error');
+                  } finally {
+                    setAdminSaving(false);
+                  }
+                }}>{adminSaving ? 'Saving…' : 'Save'}</button>
+                <button className="px-3 py-1 bg-gray-200 rounded" onClick={() => setShowAdminEdit(false)} disabled={adminSaving}>Cancel</button>
+              </div>
+            </div>
+          </ModalPanel>
+        )}
+
+        <ReauthModal
+          open={reauthOpen}
+          email={(reauthPromiseRef && reauthPromiseRef.current && reauthPromiseRef.current.email) || (adminProfile && adminProfile.email) || ''}
+          onClose={handleReauthCancel}
+          onConfirm={handleReauthConfirm}
+        />
+
+        {/* AUDITS */}
+
 
       </main>
     </div>

@@ -1,3 +1,4 @@
+import { showToast } from './App';
 import React from "react";
   /* -----------------------------
      Render popup JSX
@@ -52,7 +53,7 @@ import React from "react";
               className="btn btn-success"
               onClick={() => {
                 setIncomingRequest(null);
-                alert('Tap Accept in the incoming request panel.');
+                if (typeof showToast === 'function') showToast('Tap Accept in the incoming request panel.', 'info');
               }}
             >
               View Request
@@ -303,7 +304,7 @@ import React from "react";
                         userRole === 'cleaner'
                           ? activeJob.customerUid
                           : activeJob.cleanerUid;
-                      if (!target) return alert('Chat target missing');
+                      if (!target) { if (typeof showToast === 'function') showToast('Chat target missing', 'error'); return; }
                       setChatWith(target);
                     }}
                   >
@@ -378,7 +379,7 @@ import React from "react";
                           currentCustomerRequest.cleanerUid ||
                           activeJob?.cleanerUid;
                         if (!target)
-                          return alert('Cleaner not ready for chat.');
+                          if (typeof showToast === 'function') showToast('Cleaner not ready for chat.', 'error'); return;
                         setChatWith(target);
                       }}
                     >

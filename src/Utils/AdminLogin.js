@@ -1,3 +1,4 @@
+import { showToast } from '../App';
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { auth, firestore } from "../firebaseConfig";
@@ -18,13 +19,13 @@ export default function AdminLogin() {
       // Create superAdmin if missing
       if (!profile) {
         await createAdminProfile({ uid, username: "superadmin", password: "super123456" });
-        alert("SuperAdmin profile created! Please log in again.");
+        if (typeof showToast === 'function') showToast('SuperAdmin profile created! Please log in again.', 'success');
         return;
       }
 
       // Validate credentials
       if (username !== profile.username || password !== profile.password) {
-        alert("Incorrect username or password");
+        if (typeof showToast === 'function') showToast('Incorrect username or password', 'error');
         return;
       }
 
@@ -45,7 +46,7 @@ export default function AdminLogin() {
 
     } catch (err) {
       console.error("Admin login error:", err);
-      alert("Login failed");
+      if (typeof showToast === 'function') showToast('Login failed', 'error');
     }
   };
 

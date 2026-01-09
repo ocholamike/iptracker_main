@@ -326,6 +326,16 @@ input:checked + .slider:before {
     border-radius: 8px;
     box-shadow: none;
   }
+
+  /* Make notification panel stack and take full width on small screens */
+  .notification-panel {
+    position: static;
+    right: auto;
+    width: 100%;
+    max-height: none;
+    margin: 1rem 0;
+    box-shadow: none;
+  }
   
 }
 
