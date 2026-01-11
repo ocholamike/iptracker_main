@@ -1,11 +1,17 @@
 // src/components/ModalPanel.jsx
-import React from "react";
+import React, { useEffect } from "react";
 
 /**
  * Simple right-side modal panel wrapper (not browser modal).
  * Renders content inside a white panel with a close button.
  */
-export default function ModalPanel({ title, onClose, children, overlay = false }) {
+export default function ModalPanel({ title, onClose, children, overlay = false }) {  // When overlay is open, lock document scrolling so background (sidebar) does not move
+  useEffect(() => {
+    if (!overlay) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prev; };
+  }, [overlay]);
   // overlay=false: inline responsive panel (non-floating)
   if (!overlay) {
     return (

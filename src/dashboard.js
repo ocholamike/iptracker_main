@@ -4,8 +4,11 @@ import React, { useEffect, useState, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 
 import ModalPanel from "./components/ModalPanel";
-import WeeklyGraph from "./components/WeeklyGraph";
+import lastWeekBookings from "./components/WeeklyBarGraph";
+import lastWeekEarnings from "./components/WeeklyBarGraph";
+import WeeklyBarGraph from "./components/WeeklyBarGraph";
 import DataTable from "./components/CleanerTableModal";
+import ReportsPanel from "./components/ReportsPanel";
 import CleanerDetailModal from "./components/CleanerDetailModal";
 import ReauthModal from "./components/ReauthModal";
 
@@ -32,6 +35,13 @@ import { firestore as db, auth } from "./firebaseConfig";
 import { updateBookingStatus } from "./services/bookingService";
 import { updateEmail, updatePassword, EmailAuthProvider, reauthenticateWithCredential } from 'firebase/auth';
 import { updateUser } from "./services/userService";
+import { getAdminProfile, updateAdminProfile, findAdminProfileByAuthUid } from "./services/adminService";
+
+// Icons (using MUI icons already in project)
+import BookIcon from '@mui/icons-material/Book';
+import PeopleIcon from '@mui/icons-material/People';
+import PaidIcon from '@mui/icons-material/Paid';
+
 
 /** ---------- Helpers ---------- */
 
@@ -134,6 +144,7 @@ function FitBounds({ markers }) {
 /** ---------- Component ---------- */
 
 export default function DashboardLayout() {
+  const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
   const [activePanel, setActivePanel] = useState("dashboard");
@@ -153,6 +164,8 @@ export default function DashboardLayout() {
   const [weeklyBookings, setWeeklyBookings] = useState(new Array(7).fill(0));
   const [weeklyEarnings, setWeeklyEarnings] = useState(new Array(7).fill(0));
 
+
+
   // reports
   const [reports, setReports] = useState({
     incomePerCleaner: [],
@@ -164,6 +177,7 @@ export default function DashboardLayout() {
 
   // admin profile (fetched from users collection where role === 'admin')
   const [adminProfile, setAdminProfile] = useState(null);
+  const [resolvedAdminUid, setResolvedAdminUid] = useState(null);
 
   // modal selection
   const [selectedCleaner, setSelectedCleaner] = useState(null);
@@ -173,6 +187,10 @@ export default function DashboardLayout() {
   const [adminEditEmail, setAdminEditEmail] = useState('');
   const [adminEditPassword, setAdminEditPassword] = useState('');
   const [adminSaving, setAdminSaving] = useState(false);
+
+  // resolvedAdminUid is the Firestore admin doc id we should load (may come from auth, meta.authUid, or localStorage)
+  // We will resolve it in an effect below.
+  // const adminUid = auth.currentUser?.uid;
 
   // secure re-auth modal state and a promise bridge to await user input
   const [reauthOpen, setReauthOpen] = useState(false);
@@ -205,6 +223,42 @@ export default function DashboardLayout() {
   useEffect(() => {
     localStorage.setItem("adminSessionActive", "true");
   }, []);
+
+  // Redirect / Recovery: run unconditionally (hooks must be called in order)
+  // If admin session is not active, redirect immediately; if session is active but we failed to resolve
+  // the admin Firestore doc, attempt recovery using stored adminUid before redirecting.
+  useEffect(() => {
+    if (!loading && !resolvedAdminUid) {
+      const isAdminFlag = localStorage.getItem('isAdmin') === 'true';
+      if (!isAdminFlag) {
+        if (typeof showToast === 'function') showToast('Admin profile not found. Please sign in again.', 'error');
+        navigate('/');
+        return;
+      }
+
+      // Session claims admin access but we couldn't resolve admin doc — attempt recovery using stored adminUid
+      console.warn('Admin session active but no resolved admin doc. localStorage.adminUid=', localStorage.getItem('adminUid'));
+      (async () => {
+        const ls = localStorage.getItem('adminUid');
+        if (ls) {
+          try {
+            const profile = await getAdminProfile(ls);
+            if (profile) {
+              setResolvedAdminUid(ls);
+              setAdminProfile(profile);
+              if (typeof showToast === 'function') showToast('Recovered admin profile from local storage', 'success');
+              return;
+            } else {
+              console.warn('No profile found for stored adminUid', ls);
+            }
+          } catch (e) {
+            console.error('Error fetching profile for stored adminUid', ls, e);
+          }
+        }
+        if (typeof showToast === 'function') showToast('Admin session active but profile missing; contact support.', 'warning');
+      })();
+    }
+  }, [loading, resolvedAdminUid, navigate]);
 
   /** ---------- realtime: users (all) ---------- */
   useEffect(() => {
@@ -367,11 +421,11 @@ export default function DashboardLayout() {
   ];
 
   const bookingColumns = [
-    { key: "bookingId", label: "Booking ID" },
+    { key: "bookingId", label: "Booking ID", cellClass: 'whitespace-nowrap font-mono text-sm' },
     { key: "customerName", label: "Customer" },
     { key: "cleanerName", label: "Cleaner" },
-    { key: "price", label: "Price" },
-    { key: "status", label: "Status" },
+    { key: "price", label: "Price", cellClass: 'whitespace-nowrap text-right' },
+    { key: "status", label: "Status", cellClass: 'whitespace-nowrap' },
     { key: "timeTaken", label: "Time Taken" }
   ];
 
@@ -526,7 +580,7 @@ export default function DashboardLayout() {
       name: u.name || u.fullName || u.email || u.id,
       email: u.email || "",
       phone: u.phone || "",
-      rating: u.averageRating ?? u.rating ?? 0,
+      rating: ((u.averageRating ?? u.rating ?? 0).toFixed(1)),  // ✅ one decimal
       categories: u.categories && u.categories.length ? u.categories.join(", ") : (u.category || "Not specified")
     }));
   }, [cleaners, usersMap]);
@@ -642,36 +696,115 @@ export default function DashboardLayout() {
 
 
   // admin profile display values (fetched from users collection where role === 'admin')
-  const adminName = adminProfile?.name || adminProfile?.fullName || "Super Admin";
-  const adminEmail = adminProfile?.email || "admin@domain.com";
-
+    // Resolve which admin Firestore doc to load: prefer a profile that maps to the current auth.uid,
+  // else fall back to previously stored adminUid in localStorage (legacy username login uses this).
   useEffect(() => {
-    if (adminProfile) {
-      setAdminEditName(adminProfile.name || '');
-      setAdminEditEmail(adminProfile.email || '');
-    }
-  }, [adminProfile]);
+    let cancelled = false;
+
+    const resolveAdminDoc = async () => {
+      try {
+        const current = auth.currentUser;
+        if (current) {
+          // Try direct match with auth UID
+          let profile = await getAdminProfile(current.uid);
+          // Try to find a doc that has meta.authUid === current.uid
+          if (!profile) {
+            try {
+              profile = await findAdminProfileByAuthUid(current.uid);
+            } catch (e) {
+              console.warn('findAdminProfileByAuthUid failed', e);
+            }
+          }
+
+          if (profile) {
+            localStorage.setItem('adminUid', profile.id);
+            if (!cancelled) setResolvedAdminUid(profile.id);
+            return;
+          }
+        }
+
+        // fallback to previously stored admin doc id (legacy username login uses this)
+        const ls = localStorage.getItem('adminUid');
+        if (ls) {
+          if (!cancelled) setResolvedAdminUid(ls);
+          return;
+        }
+
+        if (!cancelled) setResolvedAdminUid(null);
+      } catch (error) {
+        console.error('Error resolving admin doc:', error);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    resolveAdminDoc();
+
+    return () => { cancelled = true; };
+  }, [auth.currentUser]);
+
+  // When resolvedAdminUid changes, fetch the profile doc
+  useEffect(() => {
+    if (!resolvedAdminUid) return;
+    setLoading(true);
+
+    const fetchProfile = async () => {
+      try {
+        const profile = await getAdminProfile(resolvedAdminUid);
+        setAdminProfile(profile);
+      } catch (error) {
+        console.error("Error fetching admin profile:", error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchProfile();
+  }, [resolvedAdminUid]);
+
+    // Show loading while we are resolving the admin profile — this avoids render-time crashes
+    if (loading || !adminProfile) return <p className="text-center mt-4">Dashboard Opening...</p>;
+
 
   /** ---------- Render ---------- */
+  // Compute a short initial for the avatar (fallback to 'A')
+  const adminInitial = adminProfile?.username ? adminProfile.username.trim().charAt(0).toUpperCase() : 'A';
+
   return (
     <div className="flex min-h-screen bg-gray-100">
       {/* SIDEBAR (hidden on small screens) */}
-      <aside className="hidden md:flex w-64 bg-white shadow-lg p-6 flex-col gap-6">
-        <div className="flex flex-col items-center text-center">
-          <div className="w-20 h-20 rounded-full bg-gray-300 mb-3"></div>
-          <h2 className="text-lg font-semibold">{adminName}</h2>
-          <p className="text-sm text-gray-500">{adminEmail}</p>
+      <aside className="hidden md:flex w-64 bg-white shadow-lg p-6 flex-col gap-6 sticky top-0 h-screen">
+        <div className="bg-white p-4 rounded-2xl shadow w-full max-w-sm mx-auto text-center">
+          {/* Header */}
+          <div className="w-16 h-16 rounded-full bg-gray-400 mx-auto flex items-center justify-center mb-3 text-xl font-semibold text-gray-700 overflow-hidden">
+            {adminProfile?.meta?.photoURL ? (
+              <img src={adminProfile.meta.photoURL} alt="Admin avatar" className="w-full h-full object-cover" />
+            ) : (
+              <span>{adminInitial}</span>
+            )}
+          </div>
+          <h2 className="text-xl font-bold text-gray-800">{adminProfile?.username || 'Admin'}</h2>
+          <p className="text-sm text-gray-500 mb-4">{adminProfile?.meta?.email || "No email set"}</p>
 
-          <div className="mt-2 flex gap-2">
-            <button onClick={() => setShowAdminEdit(true)} className="text-xs text-blue-600 underline">Edit Profile</button>
+          {/* Actions */}
+          <div className="flex justify-center gap-2">
+            <button
+              onClick={() => setShowAdminEdit(true)}
+              className="px-3 py-1 text-sm font-medium text-blue-600 bg-blue-50 rounded hover:bg-blue-100 transition"
+            >
+              Edit Profile
+            </button>
             <button
               onClick={endAdminSession}
-              className="text-xs text-red-500 underline"
+              className="px-3 py-1 text-sm font-medium text-red-600 bg-red-50 rounded hover:bg-red-100 transition"
             >
-              Exit Admin Mode
+              Logout
             </button>
           </div>
         </div>
+      
+    
+
 
         <nav className="flex flex-col gap-3 text-gray-700">
           <button className="p-3 rounded-xl hover:bg-gray-200 text-left" onClick={() => setActivePanel("dashboard")}>Dashboard</button>
@@ -716,27 +849,48 @@ export default function DashboardLayout() {
         {/* Dashboard */}
         {activePanel === "dashboard" && (
           <>
-            {/* Top 3 circular stats */}
+            {/* Top 3 modern stat cards */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              <div className="bg-white p-6 rounded-2xl shadow text-center">
-                <div className="w-32 h-32 rounded-full border-4 border-gray-300 flex items-center justify-center text-4xl font-bold">
-                  {bookings.length}
+              <div className="bg-white p-4 rounded-2xl shadow flex items-center justify-between gap-4">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 rounded-lg bg-indigo-50 flex items-center justify-center text-indigo-600">
+                    <BookIcon fontSize="small" />
+                  </div>
+                  <div>
+                    <div className="text-sm text-gray-500">Bookings</div>
+                    <div className="text-2xl font-bold">{bookings.length}</div>
+                  </div>
                 </div>
-                <p className="mt-4 text-gray-600">Bookings</p>
+                <div className="text-sm text-gray-500 text-right">
+                  <div>Avg / day</div>
+                  <div className="text-lg font-semibold">{(weeklyBookings.reduce((a,b)=>a+Number(b||0),0)/7).toFixed(1)}</div>
+                </div>
               </div>
 
-              <div className="bg-white p-6 rounded-2xl shadow text-center">
-                <div className="w-32 h-32 rounded-full border-4 border-gray-300 flex items-center justify-center text-4xl font-bold">
-                  {cleaners.length}
+              <div className="bg-white p-4 rounded-2xl shadow flex items-center justify-between gap-4">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 rounded-lg bg-green-50 flex items-center justify-center text-green-600">
+                    <PeopleIcon fontSize="small" />
+                  </div>
+                  <div>
+                    <div className="text-sm text-gray-500">Cleaners</div>
+                    <div className="text-2xl font-bold">{cleaners.length}</div>
+                  </div>
                 </div>
-                <p className="mt-4 text-gray-600">Cleaners</p>
+                <div className="text-sm text-gray-500 text-right">
+                  <div>Avg daily income</div>
+                  <div className="text-lg font-semibold">{(weeklyEarnings.reduce((a,b)=>a+Number(b||0),0)/7).toFixed(0)}</div>
+                </div>
               </div>
 
-              <div className="bg-white p-6 rounded-2xl shadow text-center">
-                <div className="w-32 h-32 rounded-full border-4 border-gray-300 flex items-center justify-center text-4xl font-bold">
-                  {weeklyEarnings.reduce((a, b) => a + Number(b || 0), 0).toFixed(0)}
+              <div className="bg-white p-4 rounded-2xl shadow flex items-center gap-4">
+                <div className="w-12 h-12 rounded-lg bg-yellow-50 flex items-center justify-center text-yellow-600">
+                  <PaidIcon fontSize="small" />
                 </div>
-                <p className="mt-4 text-gray-600">Weekly Revenue</p>
+                <div>
+                  <div className="text-sm text-gray-500">Weekly Revenue</div>
+                  <div className="text-2xl font-bold">{weeklyEarnings.reduce((a, b) => a + Number(b || 0), 0).toFixed(0)}</div>
+                </div>
               </div>
             </div>
 
@@ -809,10 +963,19 @@ export default function DashboardLayout() {
               </div>
             </div>
 
-            {/* GRAPHS */}
+            {/* WEEKLY DASHBOARD GRAPHS */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <WeeklyGraph title="Customers Served Per Day (last 7 days)" data={weeklyBookings} />
-              <WeeklyGraph title="Money Earned Per Day (last 7 days)" data={weeklyEarnings} />
+              <WeeklyBarGraph
+                title="Customers Served"
+                thisWeek={weeklyBookings}
+                lastWeek={lastWeekBookings}
+              />
+
+              <WeeklyBarGraph
+                title="Money Earned"
+                thisWeek={weeklyEarnings}
+                lastWeek={lastWeekEarnings}
+              />
             </div>
           </>
         )}
@@ -911,51 +1074,7 @@ export default function DashboardLayout() {
         {/* REPORTS */}
         {activePanel === "reports" && (
           <ModalPanel title="Reports & Analytics" onClose={() => setActivePanel("dashboard")}>
-            <div className="flex items-center gap-2 mb-4">
-              <label className="text-sm">From:</label>
-              <input type="date" value={reportFrom ? reportFrom.toISOString().slice(0,10) : ''} onChange={(e) => setReportFrom(e.target.value ? new Date(e.target.value) : null)} className="border p-1 rounded" />
-              <label className="text-sm">To:</label>
-              <input type="date" value={reportTo ? reportTo.toISOString().slice(0,10) : ''} onChange={(e) => setReportTo(e.target.value ? (new Date(e.target.value + 'T23:59:59')) : null)} className="border p-1 rounded" />
-              <button className="px-3 py-1 bg-blue-500 text-white rounded" onClick={() => refreshReports(reportFrom, reportTo)}>Refresh</button>
-              <div className="ml-2 flex gap-2">
-                <button className="px-2 py-1 border rounded text-sm" onClick={() => applyPresetDays(30)}>Last 30 days</button>
-                <button className="px-2 py-1 border rounded text-sm" onClick={() => applyPresetDays(90)}>Last 3 months</button>
-                <button className="px-2 py-1 border rounded text-sm" onClick={() => { setReportFrom(null); setReportTo(null); refreshReports(null, null); }}>All time</button>
-              </div>
-              <div className="ml-auto text-right text-sm text-gray-500">Range: {reportFrom ? reportFrom.toLocaleDateString() : 'All'} — {reportTo ? reportTo.toLocaleDateString() : 'All'}</div>
-            </div>
-
-            <h3 className="text-lg font-semibold mt-2 mb-2">Income Per Cleaner</h3>
-            <DataTable
-              columns={[
-                { key: "cleanerId", label: "Cleaner ID" },
-                { key: "total", label: "Total Income" }
-              ]}
-              data={reports.incomePerCleaner.map(r => ({ id: r.cleanerId, ...r }))}
-              onDelete={async (cleanerId) => {
-                if (!window.confirm('Delete payments for this cleaner in the selected range?')) return;
-                try {
-                  const deleted = await deleteIncomeForCleaner(cleanerId, reportFrom, reportTo);
-                  showToast(`Deleted ${deleted.length} payments.`, 'success');
-                  await refreshReports();
-                } catch (err) {
-                  console.error(err);
-                  showToast('Failed to delete payments', 'error');
-                }
-              }}
-              exportFilename={`income_per_cleaner_${formatDateForFilename(reportFrom)}_${formatDateForFilename(reportTo)}.csv`}
-            />
-
-            <h3 className="text-lg font-semibold mt-6 mb-2">Ratings Per Cleaner</h3>
-            <DataTable
-              columns={[
-                { key: "cleanerId", label: "Cleaner ID" },
-                { key: "average", label: "Average Rating" },
-                { key: "count", label: "Rating Count" }
-              ]}
-              data={reports.ratingsPerCleaner}
-              exportFilename={`ratings_per_cleaner_${formatDateForFilename(reportFrom)}_${formatDateForFilename(reportTo)}.csv`}
-            />
+            <ReportsPanel onClose={() => setActivePanel('dashboard')} />
           </ModalPanel>
         )}
 
@@ -1020,100 +1139,155 @@ export default function DashboardLayout() {
 
         {/* ADMIN PROFILE EDIT */}
         {showAdminEdit && (
-          <ModalPanel title="Edit Admin Profile" onClose={() => setShowAdminEdit(false)} overlay={true}>
-            <div className="p-4">
-              <div className="mb-2">
-                <label className="text-sm font-medium">Name</label>
-                <input className="w-full border p-2 rounded" value={adminEditName} onChange={(e) => setAdminEditName(e.target.value)} />
+          <ModalPanel
+            title="Edit Admin Profile"
+            onClose={() => setShowAdminEdit(false)}
+            overlay={true}
+          >
+            <div className="p-4 space-y-4">
+              {/* Name */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                <input
+                  type="text"
+                  className="w-full border border-gray-300 p-2 rounded focus:outline-none focus:ring-2 focus:ring-blue-300"
+                  value={adminEditName}
+                  onChange={(e) => setAdminEditName(e.target.value)}
+                  placeholder="Admin Name"
+                />
               </div>
-              <div className="mb-2">
-                <label className="text-sm font-medium">Email</label>
-                <input className="w-full border p-2 rounded" value={adminEditEmail} onChange={(e) => setAdminEditEmail(e.target.value)} />
-              </div>
-              <div className="mb-2">
-                <label className="text-sm font-medium">Password (leave blank to keep)</label>
-                <input type="password" className="w-full border p-2 rounded" value={adminEditPassword} onChange={(e) => setAdminEditPassword(e.target.value)} />
-              </div>
-              <div className="mt-4 flex gap-2">
-                <button className="px-3 py-1 bg-blue-500 text-white rounded" onClick={async () => {
-                  setAdminSaving(true);
-                  try {
-                    // update firestore first
-                    await updateUser(adminProfile.id, { name: adminEditName, email: adminEditEmail });
 
-                    // then try auth updates if this is the signed-in admin
-                    const current = auth.currentUser;
-                    if (current && adminProfile.id === current.uid) {
-                      // update email and password with re-auth fallback
-                      if (adminEditEmail && adminEditEmail !== current.email) {
-                        try {
-                          await updateEmail(current, adminEditEmail);
-                        } catch (e) {
-                          // requires recent login => attempt re-auth
-                          if (e.code === 'auth/requires-recent-login') {
-                            try {
-                              const pwd = await requestReauth(current.email);
-                              const cred = EmailAuthProvider.credential(current.email, pwd);
-                              await reauthenticateWithCredential(current, cred);
-                              await updateEmail(current, adminEditEmail);
-                            } catch (reauthErr) {
-                              if (reauthErr && reauthErr.message === 'cancelled') {
-                                showToast('Email update cancelled (no password provided)', 'warning');
-                              } else {
-                                console.error('Reauth failed (email):', reauthErr);
-                                showToast('Could not update email: re-authentication failed', 'error');
-                              }
-                            }
-                          } else {
-                            console.error('Update email failed:', e);
-                            showToast('Failed to update email', 'error');
-                          }
-                        }
+              {/* Email */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                <input
+                  type="email"
+                  className="w-full border border-gray-300 p-2 rounded focus:outline-none focus:ring-2 focus:ring-blue-300"
+                  value={adminEditEmail}
+                  onChange={(e) => setAdminEditEmail(e.target.value)}
+                  placeholder="admin@example.com"
+                />
+              </div>
+
+              {/* Password */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Password <span className="text-gray-400">(leave blank to keep current)</span>
+                </label>
+                <input
+                  type="password"
+                  className="w-full border border-gray-300 p-2 rounded focus:outline-none focus:ring-2 focus:ring-blue-300"
+                  value={adminEditPassword}
+                  onChange={(e) => setAdminEditPassword(e.target.value)}
+                  placeholder="••••••••"
+                />
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex justify-end gap-3 mt-4">
+                <button
+                  className={`px-4 py-2 rounded font-medium text-white ${
+                    adminSaving ? 'bg-blue-300 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
+                  } transition`}
+                  onClick={async () => {
+                    setAdminSaving(true);
+                    try {
+                      const current = auth.currentUser;
+
+                      // Update Firestore admin profile with new username/email/password fields
+                      const firestorePatch = {};
+                      if (adminEditName) firestorePatch.username = adminEditName;
+                      if (adminEditEmail) firestorePatch.meta = { ...(adminProfile.meta || {}), email: adminEditEmail };
+                      if (adminEditPassword) firestorePatch.password = adminEditPassword;
+
+                      if (Object.keys(firestorePatch).length > 0) {
+                        await updateAdminProfile(adminProfile.id, firestorePatch);
                       }
 
-                      if (adminEditPassword) {
-                        try {
-                          await updatePassword(current, adminEditPassword);
-                        } catch (e) {
-                          if (e.code === 'auth/requires-recent-login') {
-                            try {
-                              const pwd = await requestReauth(current.email);
-                              const cred = EmailAuthProvider.credential(current.email, pwd);
-                              await reauthenticateWithCredential(current, cred);
-                              await updatePassword(current, adminEditPassword);
-                            } catch (reauthErr) {
-                              if (reauthErr && reauthErr.message === 'cancelled') {
-                                showToast('Password update cancelled (no password provided)', 'warning');
-                              } else {
-                                console.error('Reauth failed (password):', reauthErr);
-                                showToast('Could not update password: re-authentication failed', 'error');
+                      // If current user is logged in via Firebase Auth, sync email/password changes
+                      if (current && adminProfile.meta?.authUid === current.uid) {
+                        // Email update
+                        if (adminEditEmail && adminEditEmail !== current.email) {
+                          try {
+                            await updateEmail(current, adminEditEmail);
+                          } catch (e) {
+                            if (e.code === 'auth/requires-recent-login') {
+                              try {
+                                const pwd = await requestReauth(current.email);
+                                const cred = EmailAuthProvider.credential(current.email, pwd);
+                                await reauthenticateWithCredential(current, cred);
+                                await updateEmail(current, adminEditEmail);
+                              } catch (reauthErr) {
+                                if (reauthErr?.message === 'cancelled') {
+                                  showToast('Email update cancelled', 'warning');
+                                } else {
+                                  showToast('Email update failed (reauth required)', 'error');
+                                }
                               }
+                            } else {
+                              showToast('Email update failed: ' + (e?.message || 'Unknown error'), 'error');
                             }
-                          } else {
-                            console.error('Update password failed:', e);
-                            showToast('Failed to update password', 'error');
                           }
                         }
+
+                        // Password update
+                        if (adminEditPassword) {
+                          try {
+                            await updatePassword(current, adminEditPassword);
+                          } catch (e) {
+                            if (e.code === 'auth/requires-recent-login') {
+                              try {
+                                const pwd = await requestReauth(current.email);
+                                const cred = EmailAuthProvider.credential(current.email, pwd);
+                                await reauthenticateWithCredential(current, cred);
+                                await updatePassword(current, adminEditPassword);
+                              } catch (reauthErr) {
+                                if (reauthErr?.message === 'cancelled') {
+                                  showToast('Password update cancelled', 'warning');
+                                } else {
+                                  showToast('Password update failed (reauth required)', 'error');
+                                }
+                              }
+                            } else {
+                              showToast('Password update failed: ' + (e?.message || 'Unknown error'), 'error');
+                            }
+                          }
+                        }
+
+                        showToast('Admin profile updated (Firebase Auth synced)', 'success');
+                      } else {
+                        // User is logged in via legacy username/password (not Firebase Auth)
+                        showToast('Admin profile updated (Firestore only)', 'success');
                       }
 
-                      showToast('Admin profile updated (auth + firestore)', 'success');
-                    } else {
-                      showToast('Admin profile updated', 'success');
+                      setShowAdminEdit(false);
+                      setAdminEditName('');
+                      setAdminEditEmail('');
+                      setAdminEditPassword('');
+                    } catch (err) {
+                      console.error("Save error:", err);
+                      showToast('Failed to update admin profile: ' + (err?.message || 'Unknown error'), 'error');
+                    } finally {
+                      setAdminSaving(false);
                     }
+                  }}
+                  disabled={adminSaving}
+                >
+                  {adminSaving ? 'Saving...' : 'Save'}
+                </button>
 
-                    setShowAdminEdit(false);
-                  } catch (err) {
-                    console.error('Failed update admin', err);
-                    showToast('Failed to update admin profile', 'error');
-                  } finally {
-                    setAdminSaving(false);
-                  }
-                }}>{adminSaving ? 'Saving…' : 'Save'}</button>
-                <button className="px-3 py-1 bg-gray-200 rounded" onClick={() => setShowAdminEdit(false)} disabled={adminSaving}>Cancel</button>
+                <button
+                  className="px-4 py-2 rounded border border-gray-300 hover:bg-gray-100 transition"
+                  onClick={() => setShowAdminEdit(false)}
+                  disabled={adminSaving}
+                >
+                  Cancel
+                </button>
               </div>
             </div>
           </ModalPanel>
         )}
+
 
         <ReauthModal
           open={reauthOpen}
