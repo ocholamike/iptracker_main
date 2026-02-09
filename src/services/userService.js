@@ -21,6 +21,7 @@ const SAFE_USER_FIELDS = [
   "email",
   "phone",
   "photoURL",
+  "role",
   "category",
   "categories"
 ];
@@ -33,7 +34,7 @@ export async function createUserProfile({
   name = "",
   email = "",
   phone = "",
-  role = "customer",
+  role = null,
   categories = [],
   category = null,
   photoURL = "",

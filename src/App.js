@@ -536,6 +536,32 @@ useEffect(() => {
   
 }, [activeJob, userRole]);
 
+/* -----------------------------
+   SYNC ROLE CHANGES TO RTDB
+   - When userRole changes, update the RTDB location to reflect new role
+   - This ensures cleaners appear on map immediately after role selection
+   ----------------------------- */
+useEffect(() => {
+  if (!sharing || !sessionId || !userRole || userRole === 'viewer') return;
+
+  // If we have current coords, write them with the updated role
+  if (currentCoords) {
+    const payload = {
+      sessionId,
+      uid: user?.uid || null,
+      role: userRole,
+      name: userName || 'Anonymous',
+      lat: currentCoords.lat,
+      lng: currentCoords.lng,
+      accuracy: 0,
+      isAvailable,
+      timestamp: Date.now(),
+    };
+
+    const locRef = rtdbRef(database, `locations/${sessionId}`);
+    rtdbSet(locRef, payload).catch(console.error);
+  }
+}, [userRole, sharing, sessionId, currentCoords, userName, isAvailable, user?.uid]);
 
   /* -----------------------------
      VISIBILITY RULES: compute visible markers

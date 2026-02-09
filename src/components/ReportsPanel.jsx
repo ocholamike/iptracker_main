@@ -44,8 +44,6 @@ export default function ReportsPanel({ onClose }) {
       setWeeklyEarnings(we);
       setIncomePerCleaner(inc.map(i => ({ id: i.cleanerId, cleanerId: i.cleanerId, total: i.total, cleanerName: (cleanerMap[i.cleanerId]?.name || cleanerMap[i.cleanerId]?.fullName || cleanerMap[i.cleanerId]?.email || i.cleanerId) })));
       setRatingsPerCleaner(ratings.map(r => ({ ...r, cleanerName: (cleanerMap[r.cleanerId]?.name || cleanerMap[r.cleanerId]?.fullName || cleanerMap[r.cleanerId]?.email || r.cleanerId) })));
-    } catch (err) {
-      console.error('Failed to fetch reports', err);
     } finally {
       setLoading(false);
     }

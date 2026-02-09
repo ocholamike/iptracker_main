@@ -11,6 +11,7 @@ import DataTable from "./components/CleanerTableModal";
 import ReportsPanel from "./components/ReportsPanel";
 import CleanerDetailModal from "./components/CleanerDetailModal";
 import ReauthModal from "./components/ReauthModal";
+import DeleteConfirmModal from "./components/DeleteConfirmModal";
 
 import {
   collection,
@@ -195,6 +196,7 @@ export default function DashboardLayout() {
   // secure re-auth modal state and a promise bridge to await user input
   const [reauthOpen, setReauthOpen] = useState(false);
   const reauthPromiseRef = useRef(null);
+  const [deleteConfirmModal, setDeleteConfirmModal] = useState(null); // { collectionName, id, entityType }
   const requestReauth = (email) => new Promise((resolve, reject) => {
     reauthPromiseRef.current = { resolve, reject, email };
     setReauthOpen(true);
@@ -403,12 +405,26 @@ export default function DashboardLayout() {
 
   // generic delete helper
   const handleDeleteDoc = async (collectionName, id) => {
-    if (!window.confirm("Delete this record?")) return;
+    const entityType = collectionName === 'users' ? 'Cleaner' : 'Booking';
+    setDeleteConfirmModal({ collectionName, id, entityType });
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteConfirmModal) return;
+    const { collectionName, id, entityType } = deleteConfirmModal;
+    
     try {
       await deleteDoc(doc(db, collectionName, id));
+      if (typeof showToast === 'function') showToast(`${entityType} deleted successfully`, 'success');
+      setDeleteConfirmModal(null);
     } catch (err) {
-      if (typeof showToast === 'function') showToast('Delete failed', 'error');
+      if (typeof showToast === 'function') showToast('Delete failed. Please try again.', 'error');
+      setDeleteConfirmModal(null);
     }
+  };
+
+  const handleCancelDelete = () => {
+    setDeleteConfirmModal(null);
   };
 
   // Columns for CleanerTableModal (kept simple)
@@ -1037,20 +1053,13 @@ export default function DashboardLayout() {
                 <button className="px-3 py-1 bg-blue-500 text-white rounded" onClick={() => {
                   // Simple Booking Details print (not a customer payment receipt)
                   const win = window.open('', '_blank');
-                  const requested = selectedBooking.__date ? selectedBooking.__date.toLocaleString() : '—';
+                  const requested = selectedBooking.createdAt ? toDateSafe(selectedBooking.createdAt).toLocaleString() : '—';
                   const closed = (selectedBooking.closedAt || selectedBooking.closed_at || selectedBooking.completedAt || selectedBooking.completed_at) ? toDateSafe(selectedBooking.closedAt || selectedBooking.closed_at || selectedBooking.completedAt || selectedBooking.completed_at).toLocaleString() : '—';
                   const html = `<!doctype html><html><head><meta charset="utf-8"><title>Booking Details</title><style>body{font-family:Arial,Helvetica,sans-serif;padding:20px;color:#111} h2{margin-bottom:6px} table{width:100%;border-collapse:collapse} td{padding:6px;border-bottom:1px solid #eee}</style></head><body><h2>Booking Details</h2><table><tr><td><strong>Booking ID</strong></td><td>${selectedBooking.bookingId || selectedBooking.id}</td></tr><tr><td><strong>Customer</strong></td><td>${selectedBooking.customerName}</td></tr><tr><td><strong>Customer Phone</strong></td><td>${(usersMap[selectedBooking.customerId] && usersMap[selectedBooking.customerId].phone) || '—'}</td></tr><tr><td><strong>Cleaner</strong></td><td>${selectedBooking.cleanerName}</td></tr><tr><td><strong>Cleaner Phone</strong></td><td>${(usersMap[selectedBooking.cleanerId] && usersMap[selectedBooking.cleanerId].phone) || '—'}</td></tr><tr><td><strong>Service</strong></td><td>${selectedBooking.serviceType || '—'}</td></tr><tr><td><strong>Categories</strong></td><td>${(usersMap[selectedBooking.cleanerId] && usersMap[selectedBooking.cleanerId].categories && usersMap[selectedBooking.cleanerId].categories.join(', ')) || '—'}</td></tr><tr><td><strong>Price</strong></td><td>${formatKsh(selectedBooking.price)}</td></tr><tr><td><strong>Status</strong></td><td>${selectedBooking.status}</td></tr><tr><td><strong>Requested At</strong></td><td>${requested}</td></tr><tr><td><strong>Completed At</strong></td><td>${closed}</td></tr><tr><td><strong>Time Taken</strong></td><td>${selectedBooking.timeTaken}</td></tr></table></body></html>`;
                   win.document.write(html);
                   win.print();
                   win.close();
                 }}>Print</button>
-                <button className="px-3 py-1 bg-yellow-500 text-white rounded" onClick={async () => {
-                  const newStatus = prompt("Update status (pending, accepted, in-progress, closed, paid):", selectedBooking.status);
-                  if (!newStatus) return;
-                  await updateBookingStatus(selectedBooking.id, newStatus);
-                  showToast('Status updated', 'success');
-                  setSelectedBooking(null);
-                }}>Update Status</button>
               </div>
             </div>
           </ModalPanel>
@@ -1295,6 +1304,14 @@ export default function DashboardLayout() {
           onClose={handleReauthCancel}
           onConfirm={handleReauthConfirm}
         />
+
+        {deleteConfirmModal && (
+          <DeleteConfirmModal
+            entityType={deleteConfirmModal.entityType}
+            onConfirm={handleConfirmDelete}
+            onCancel={handleCancelDelete}
+          />
+        )}
 
         {/* AUDITS */}
 
