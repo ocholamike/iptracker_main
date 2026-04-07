@@ -151,6 +151,13 @@ export default function DashboardLayout() {
   const [activePanel, setActivePanel] = useState("dashboard");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
+  // ensure detail modals are closed when changing active panel
+  useEffect(() => {
+    setSelectedCleaner(null);
+    setSelectedBooking(null);
+    setDeleteConfirmModal(null);
+  }, [activePanel]);
+
   // raw collections
   const [usersMap, setUsersMap] = useState({}); // id -> user
   const [cleaners, setCleaners] = useState([]); // array of cleaner users
@@ -828,8 +835,6 @@ export default function DashboardLayout() {
           <button className="p-3 rounded-xl hover:bg-gray-200 text-left" onClick={() => setActivePanel("bookings")}>Bookings</button>
           <button className="p-3 rounded-xl hover:bg-gray-200 text-left" onClick={() => setActivePanel("maps")}>Maps</button>
           <button className="p-3 rounded-xl hover:bg-gray-200 text-left" onClick={openReportsPanel}>Reports</button>
-          <button className="p-3 rounded-xl hover:bg-gray-200 text-left" onClick={() => setActivePanel("conversations")}>Conversations</button>
-
         </nav>
       </aside>
 
@@ -862,6 +867,13 @@ export default function DashboardLayout() {
             </div>
           </div>
         )}
+        {/* CLEANER DETAIL */}
+        {selectedCleaner && (
+          <ModalPanel title="Cleaner Details" onClose={() => setSelectedCleaner(null)}>
+            <CleanerDetailModal cleaner={selectedCleaner} onClose={() => setSelectedCleaner(null)} />
+          </ModalPanel>
+        )}
+
         {/* Dashboard */}
         {activePanel === "dashboard" && (
           <>
@@ -1014,12 +1026,6 @@ export default function DashboardLayout() {
           </ModalPanel>
         )} 
 
-        {/* CLEANER DETAIL */}
-        {selectedCleaner && (
-          <ModalPanel title="Cleaner Details" onClose={() => setSelectedCleaner(null)}>
-            <CleanerDetailModal cleaner={selectedCleaner} onClose={() => setSelectedCleaner(null)} />
-          </ModalPanel>
-        )}
 
 
         {/* BOOKINGS panel */}
@@ -1090,12 +1096,12 @@ export default function DashboardLayout() {
         {/* MAPS */}
         {activePanel === "maps" && (
           <ModalPanel title="Maps" onClose={() => setActivePanel("dashboard")}>
-            <div className="h-96">
+            <div className="h-[calc(100vh-240px)] lg:h-[calc(100vh-200px)]">
               {cleanerMarkers.length === 0 ? (
-                <div className="h-64 flex items-center justify-center text-gray-500">No active cleaners broadcasting location</div>
+                <div className="h-full flex items-center justify-center text-gray-500">No active cleaners broadcasting location</div>
               ) : (
                 <MapContainer
-                  className="h-96 w-full rounded"
+                  className="h-full w-full rounded"
                   center={[cleanerMarkers[0].lat, cleanerMarkers[0].lng]}
                   zoom={12}
                   scrollWheelZoom={false}
@@ -1139,12 +1145,7 @@ export default function DashboardLayout() {
           </ModalPanel>
         )}
 
-        {/* CONVERSATIONS */}
-        {activePanel === "conversations" && (
-          <ModalPanel title="Conversations" onClose={() => setActivePanel("dashboard")}>
-            <div className="h-64 flex items-center justify-center text-gray-500">Chat Logs / Conversations Placeholder</div>
-          </ModalPanel>
-        )}
+
 
         {/* ADMIN PROFILE EDIT */}
         {showAdminEdit && (

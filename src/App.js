@@ -690,6 +690,7 @@ useEffect(() => {
 
   if (!my.length) {
     setCurrentCustomerRequest(null);
+    setCustomerNotice(null); // Clear any old notices when no active request
     return;
   }
 
@@ -704,9 +705,10 @@ useEffect(() => {
     status: latest.status,
   });
 
-    // -----------------------------
-    // Status handling
-    // -----------------------------
+  // Set notice based on status
+  if (latest.status === 'pending') {
+    setCustomerNotice({ title: 'Request sent', body: 'Waiting for cleaner response', type: 'info' });
+  }
     if (latest.status === 'accepted') {
       setCustomerNotice({
         title: 'Cleaner Accepted',
@@ -748,6 +750,27 @@ useEffect(() => {
         type: 'error'
       });
       setCurrentCustomerRequest(null);
+      showToast('Cleaner rejected your request', 'error');
+      setTimeout(() => closeChatAndClearNotifications(), 1200);
+      // Remove the rejected request from RTDB after showing notice
+      setTimeout(() => rtdbRemove(rtdbRef(database, `requests/${cleanerIdOrSession}`)), 2000);
+    }
+
+    if (latest.status === 'cancelled') {
+      setCustomerNotice({ title: 'Cancelled', body: 'Your request was cancelled', type: 'error' });
+      // clear customer UI state
+      setCurrentCustomerRequest(null);
+      setActiveJob(null);
+      setCurrentRequestKey(null);
+      setTrackingCleaner(false);
+      setIsTrackingTarget(false);
+      // show toast and close chat
+      showToast('Your request was cancelled', 'error');
+      setTimeout(() => closeChatAndClearNotifications(), 1200);
+      // auto-dismiss notice
+      setTimeout(() => setCustomerNotice(null), 4000);
+      // Remove the cancelled request from RTDB after showing notice
+      setTimeout(() => rtdbRemove(rtdbRef(database, `requests/${cleanerIdOrSession}`)), 2000);
     }
 
     if (latest.status === "waiting_for_payment") {
@@ -777,6 +800,9 @@ useEffect(() => {
       setIsTrackingTarget(false);
       setCurrentRequestKey(null);
       setCurrentRequestId(null);
+      // notify and close chat
+      showToast('Job closed — thank you', 'success');
+      setTimeout(() => closeChatAndClearNotifications(), 1200);
       return;
     }
   });
@@ -810,7 +836,20 @@ useEffect(() => {
           setIsAvailable(true);
           localStorage.removeItem('activeJob');
         }
+
+        // Show a brief notice to the cleaner and close chat
         setIncomingRequest(null);
+        const isRejected = data.status === 'rejected';
+        const title = isRejected ? 'Booking request rejected' : 'Booking cancelled';
+        const body = isRejected ? 'The request has been rejected.' : 'The booking has been cancelled.';
+        setCustomerNotice({ title, body, type: 'error' });
+        showToast(title, 'error');
+        // Dismiss the notice after a few seconds and close chat window
+        setTimeout(() => {
+          setCustomerNotice(null);
+          closeChatAndClearNotifications(data.from || null);
+        }, 4000);
+
       } else if (data.status === "paid" || data.status === "closed") {
         // payment completed by customer -> cleanup job, bring cleaner online
         localStorage.removeItem('activeJob');
@@ -819,6 +858,8 @@ useEffect(() => {
         setIsTrackingTarget(false);
         setIsAvailable(true);
         setCustomerNotice({ title: 'Job paid', body: 'You are back online', type: 'success' });
+        showToast('Job paid — you are back online', 'success');
+        setTimeout(() => closeChatAndClearNotifications(), 1200);
       } else if (data.status === 'completed' || data.status === 'waiting_for_payment') {
         // customer hasn't paid yet but cleaner marked finished
         // typically we keep incomingRequest null but ensure activeJob exists
@@ -1089,6 +1130,9 @@ const acceptRequest = async () => {
       // 6) Stop showing manual route UI
       setIsTrackingTarget(false);
       setTargetCoords(null);
+      // prevent further chatting and notify
+      showToast('Cleaning done — waiting for payment', 'success');
+      setTimeout(() => closeChatAndClearNotifications(), 1200);
 
     } catch (err) {
       console.error('finishJob error', err);
@@ -1108,12 +1152,17 @@ const acceptRequest = async () => {
       // update RTDB request to cancelled
       if (activeJob.cleanerUid) {
         await rtdbSet(rtdbRef(database, `requests/${activeJob.cleanerUid}`), {
-          from: activeJob.customerUid,
-          fromName: activeJob.customerName || '',
+          from: safeUid,
+          fromName: userName || '',
+          to: activeJob.customerUid,
           status: 'cancelled',
           reason,
           timestamp: Date.now(),
         });
+        // remove RTDB request after a short grace period so customer/cleaner see cancellation
+        setTimeout(() => {
+          try { rtdbRemove(rtdbRef(database, `requests/${activeJob.cleanerUid}`)); } catch (e) { /* ignore */ }
+        }, 4000);
       }
       // update Firestore booking
       if (activeJob.bookingId) {
@@ -1136,6 +1185,9 @@ const acceptRequest = async () => {
       }
       setIsAvailable(true);
       setActiveJob(null);
+      // notify and close chat after short toast
+      showToast('Job cancelled', 'error');
+      setTimeout(() => closeChatAndClearNotifications(), 1200);
       setIsProcessing(false);
     } catch (err) {
       console.error('cancelActiveJob', err);
@@ -1151,16 +1203,48 @@ const acceptRequest = async () => {
     if (!currentCustomerRequest?.cleanerUid) { showToast('No active request', 'error'); return; }
     try {
       const cleanerUid = currentCustomerRequest.cleanerUid;
-      await rtdbSet(rtdbRef(database, `requests/${cleanerUid}`), {
+
+      // Write a cancelled status so the cleaner sees the cancellation
+      const cancelPayload = {
         from: safeUid,
         fromName: userName || '',
+        to: cleanerUid,
         status: 'cancelled',
         timestamp: Date.now(),
-      });
+        bookingId: currentRequestId || null,
+      };
 
+      await rtdbSet(rtdbRef(database, `requests/${cleanerUid}`), cancelPayload);
+
+      // If there was already a booking created, mark it cancelled in Firestore as well
+      const bookingId = currentRequestId || activeJob?.bookingId || paymentBookingId;
+      if (bookingId) {
+        try {
+          await updateBookingStatus(bookingId, 'cancelled');
+        } catch (e) {
+          console.warn('Failed to update booking status to cancelled', e);
+        }
+      }
+
+      // Update local UI states for customer
+      setCustomerNotice({ title: 'Cancelled', body: 'Your request was cancelled', type: 'error' });
       setCurrentCustomerRequest(null);
       setCurrentRequestKey(null);
-      setCustomerNotice({ title: 'Cancelled', body: 'Your request was cancelled', type: 'error' });
+      setActiveJob(null);
+      setTrackingCleaner(false);
+      setIsTrackingTarget(false);
+      setCurrentRequestId(null);
+
+      // After a short delay, remove the RTDB request entry and clear notices
+      setTimeout(async () => {
+        try {
+          await rtdbRemove(rtdbRef(database, `requests/${cleanerUid}`));
+        } catch (e) {
+          // ignore
+        }
+        setCustomerNotice(null);
+      }, 4000);
+
     } catch (err) {
       console.error('cancelCustomerRequest', err);
       showToast('Failed to cancel request', 'error');
@@ -1606,7 +1690,9 @@ const acceptRequest = async () => {
       avgRating: avg,
       ratingCount: count,
       completedJobs: prof?.completedJobs || 0,
-      bio: prof?.bio || ''
+      bio: prof?.bio || '',
+      phone: prof?.phone || '',
+      email: prof?.email || ''
     });
 
   } catch (e) {
@@ -1622,6 +1708,46 @@ const acceptRequest = async () => {
   }
 };
 
+
+  /* Store popup data for fetching cleaner details */
+  const [popupCleanerData, setPopupCleanerData] = useState({});
+
+  /* Fetch detailed cleaner data when popup opens */
+  const fetchPopupCleanerData = async (cleanerUid) => {
+    if (!cleanerUid || popupCleanerData[cleanerUid]) return;
+    try {
+      const prof = await getUserById(cleanerUid);
+      let avg = 0, count = 0;
+      try {
+        const ratingsQ = query(collection(db, 'ratings'), where('cleanerUid', '==', cleanerUid));
+        const snap = await getDocs(ratingsQ);
+        let sum = 0, cnt = 0;
+        snap.forEach(s => {
+          const d = s.data();
+          if (d && typeof d.rating === 'number') { sum += d.rating; cnt += 1; }
+        });
+        avg = cnt ? (sum / cnt) : 0;
+        count = cnt;
+      } catch (e) { console.warn(e); }
+
+      setPopupCleanerData(prev => ({
+        ...prev,
+        [cleanerUid]: {
+          name: prof?.name || 'Cleaner',
+          email: prof?.email || '',
+          phone: prof?.phone || '',
+          categories: Array.isArray(prof?.categories) ? prof.categories : (prof?.category ? [prof.category] : []),
+          avgRating: avg,
+          ratingCount: count,
+          completedJobs: prof?.completedJobs || 0,
+          totalEarnings: prof?.totalEarnings || 0,
+          status: prof?.status || 'available'
+        }
+      }));
+    } catch (e) {
+      console.warn('Failed to fetch popup cleaner data:', e);
+    }
+  };
 
   /* -----------------------------
      Render popup JSX
@@ -1643,29 +1769,180 @@ const acceptRequest = async () => {
         (currentCustomerRequest.cleanerUid === loc.uid ||
          currentCustomerRequest.cleanerUid === loc.sessionId);
 
+      const cleanerId = loc.uid || loc.sessionId;
+      
+      // Auto-fetch cleaner details
+      if (!popupCleanerData[cleanerId]) {
+        fetchPopupCleanerData(cleanerId);
+      }
+
+      const cleanerData = popupCleanerData[cleanerId] || {};
+
       return (
-        <div>
-          <strong>Cleaner</strong>
-          <div>{loc.name || 'Cleaner'}</div>
-          <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
+        <>
+          {/* Header */}
+          <div style={{
+            background: '#cacaca',
+            padding: '14px 14px',
+            borderBottom: '2px solid #FF6B00',
+            borderRadius: '14px 14px 0 0'
+          }}>
+            <div style={{
+              fontSize: '15px',
+              fontWeight: '700',
+              marginBottom: '6px',
+              color: '#1a1a1a'
+            }}>
+              {cleanerData.name || loc.name || 'Cleaner'}
+            </div>
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              fontSize: '12px',
+              color: '#666'
+            }}>
+              {cleanerData.avgRating > 0 ? (
+                <>
+                  <span>⭐ {cleanerData.avgRating.toFixed(1)}</span>
+                  <span>•</span>
+                  <span>{cleanerData.completedJobs} jobs</span>
+                </>
+              ) : (
+                <span>New Cleaner</span>
+              )}
+            </div>
+          </div>
+
+          {/* Service categories with icons */}
+          {cleanerData.categories && cleanerData.categories.length > 0 && (
+            <div style={{
+              padding: '12px 14px',
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: '6px',
+              borderBottom: '1px solid #eee',
+              background: '#fff'
+            }}>
+              {cleanerData.categories.slice(0, 3).map((cat, idx) => {
+                const iconMap = {
+                  'home': '🏠',
+                  'office': '🏢',
+                  'carpet': '🧹',
+                  'window': '🪟',
+                  'deep': '✨',
+                  'standard': '🧼',
+                  'kitchen': '🍳',
+                  'bathroom': '🚿',
+                  'general': '🧹',
+                  'cleaning': '🧼'
+                };
+                const icon = Object.entries(iconMap).find(([key]) => cat.toLowerCase().includes(key))?.[1] || '🧹';
+                return (
+                  <span key={idx} style={{
+                    fontSize: '11px',
+                    background: '#FFF5ED',
+                    color: '#FF6B00',
+                    padding: '5px 10px',
+                    borderRadius: '6px',
+                    fontWeight: '600',
+                    border: '1px solid #FFE5D0'
+                  }}>
+                    {icon} {cat}
+                  </span>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Contact info - only show if active accepted job with this cleaner */}
+          {activeJob && activeJob.cleanerUid === cleanerId && activeJob.status === 'accepted' && (cleanerData.phone || cleanerData.email) && (
+            <div style={{
+              padding: '12px 14px',
+              fontSize: '11px',
+              borderBottom: '1px solid #eee',
+              background: '#fff'
+            }}>
+              {cleanerData.phone && (
+                <div style={{ marginBottom: '4px', color: '#1a1a1a', fontWeight: '600' }}>
+                  📱 {cleanerData.phone}
+                </div>
+              )}
+              {cleanerData.email && (
+                <div style={{ color: '#666', fontSize: '10px' }}>
+                  📧 {cleanerData.email}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Action buttons */}
+          <div style={{
+            display: 'flex',
+            gap: '8px',
+            padding: '12px 14px',
+            background: '#fff',
+            borderRadius: '0 0 14px 14px'
+          }}>
             <button
-              className="btn btn-outline"
-              onClick={() => viewCleanerProfile(loc.uid || loc.sessionId)}
+              style={{
+                flex: 1,
+                padding: '10px 12px',
+                background: '#f5f5f5',
+                border: '1.5px solid #ddd',
+                borderRadius: '8px',
+                color: '#1a1a1a',
+                fontSize: '12px',
+                fontWeight: '600',
+                cursor: 'pointer',
+                transition: 'all 0.2s'
+              }}
+              onClick={() => viewCleanerProfile(cleanerId)}
+              onMouseEnter={(e) => {
+                e.target.style.background = '#ececec';
+                e.target.style.borderColor = '#bbb';
+              }}
+              onMouseLeave={(e) => {
+                e.target.style.background = '#f5f5f5';
+                e.target.style.borderColor = '#ddd';
+              }}
             >
-              View Cleaner Profile
+              Profile
             </button>
 
             <button
-              className={`btn btn-primary ${hasActiveRequest ? 'opacity-60 cursor-not-allowed' : ''}`}
+              style={{
+                flex: 1,
+                padding: '10px 12px',
+                background: hasActiveRequest ? '#ddd' : '#FF6B00',
+                border: 'none',
+                borderRadius: '8px',
+                color: '#fff',
+                fontSize: '12px',
+                fontWeight: '600',
+                cursor: hasActiveRequest ? 'not-allowed' : 'pointer',
+                transition: 'all 0.2s',
+                opacity: hasActiveRequest ? 0.6 : 1
+              }}
               onClick={() => {
-                if (!hasActiveRequest) requestCleaner(loc.uid || loc.sessionId);
+                if (!hasActiveRequest) requestCleaner(cleanerId);
               }}
               disabled={hasActiveRequest}
+              onMouseEnter={(e) => {
+                if (!hasActiveRequest) {
+                  e.target.style.background = '#E55A00';
+                }
+              }}
+              onMouseLeave={(e) => {
+                if (!hasActiveRequest) {
+                  e.target.style.background = '#FF6B00';
+                }
+              }}
             >
-              {hasActiveRequest ? 'Requested' : 'Request'}
+              {hasActiveRequest ? '✓ Sent' : 'Request'}
             </button>
           </div>
-        </div>
+        </>
       );
     }
 
@@ -1705,6 +1982,21 @@ const acceptRequest = async () => {
     } else {
       setSharing(true);
       setIsAvailable(true);
+    }
+  };
+
+  // Close chat and clear incoming message + unread state for a sender (or all if no id)
+  const closeChatAndClearNotifications = (senderId = null) => {
+    setChatWith(null);
+    setIncomingMessage(null);
+    if (senderId) {
+      setUnreadMessages((prev) => {
+        const copy = { ...prev };
+        delete copy[senderId];
+        return copy;
+      });
+    } else {
+      setUnreadMessages({});
     }
   };
 
@@ -1840,10 +2132,10 @@ const acceptRequest = async () => {
 
             <div className="mt-4">
               <button
-                className="px-3 py-2 bg-indigo-600 text-white rounded"
+                className={`px-3 py-2 text-white rounded ${sharing ? 'bg-gray-800' : 'bg-green-600'}`}
                 onClick={toggleSharing}
               >
-                {sharing ? 'Stop Sharing' : 'Start Sharing'}
+                {sharing ? 'GO OFFLINE' : 'GO ONLINE'}
               </button>
 
               <button
@@ -1899,12 +2191,20 @@ const acceptRequest = async () => {
             )}
 
             {incomingMessage && (
-              <div className="p-2 bg-yellow-50 rounded">
+              <div
+                className="p-2 bg-yellow-50 rounded cursor-pointer"
+                onClick={() => {
+                  if (incomingMessage?.senderId) {
+                    setChatWith(incomingMessage.senderId);
+                    setIncomingMessage(null);
+                  }
+                }}
+              >
                 <div><strong>Message:</strong> {incomingMessage.text}</div>
-                <div className="mt-2 text-xs text-gray-500">New chat message received.</div>
+                <div className="mt-2 text-xs text-gray-500">New chat message received. Click to open chat.</div>
                 <div className="mt-2">
                   <button
-                    onClick={() => setIncomingMessage(null)}
+                    onClick={(e) => { e.stopPropagation(); setIncomingMessage(null); }}
                     className="px-2 py-1 bg-gray-200 rounded"
                   >
                     Dismiss
@@ -2101,6 +2401,14 @@ const acceptRequest = async () => {
 
                 {/* Bio */}
                 {cleanerProfile?.bio && <p className="mt-2 text-gray-700">{cleanerProfile.bio}</p>}
+
+                {/* Phone and Email - only show if active accepted job with this cleaner */}
+                {cleanerProfile && activeJob && activeJob.cleanerUid === cleanerProfile.uid && activeJob.status === 'accepted' && (
+                  <div className="mt-2">
+                    {cleanerProfile.phone && <p className="text-sm text-gray-700">Phone: {cleanerProfile.phone}</p>}
+                    {cleanerProfile.email && <p className="text-sm text-gray-700">Email: {cleanerProfile.email}</p>}
+                  </div>
+                )}
               </div>
             )}
             
@@ -2212,7 +2520,7 @@ const acceptRequest = async () => {
             <ChatBox
               conversationId={generateConversationId(user.uid, chatWith)}
               recipientId={chatWith}
-              onClose={() => setChatWith(null)}
+              onClose={() => closeChatAndClearNotifications(chatWith)}
               userRole={userRole}
               isMobile={isMobile}
               isOpen={Boolean(chatWith)}

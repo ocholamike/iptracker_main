@@ -22,6 +22,8 @@ function ManualRoute({ from, to }) {
 
     let polyline;
     let distanceTooltip;
+    const controller = new AbortController();
+    const { signal } = controller;
 
     fetch(url, {
       method: 'POST',
@@ -29,7 +31,8 @@ function ManualRoute({ from, to }) {
         'Content-Type': 'application/json',
         'Authorization': apiKey
       },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal
     })
       .then(res => res.json())
       .then(data => {
@@ -58,6 +61,7 @@ function ManualRoute({ from, to }) {
       });
 
     return () => {
+      controller.abort();
       if (polyline) map.removeLayer(polyline);
       if (distanceTooltip) map.removeLayer(distanceTooltip);
     };
